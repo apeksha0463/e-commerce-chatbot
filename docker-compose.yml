@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  whatsapp-webhook:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    env_file:
+      - ./.env
+    restart: unless-stopped
+    networks:
+      - chatbot-network
+
+networks:
+  chatbot-network:
+    driver: bridge
