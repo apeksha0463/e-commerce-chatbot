@@ -10,40 +10,48 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+@CrossOrigin(origins = "*")
 @RestController
 public class WebhookController {
 
     @Autowired
     private RestTemplate restTemplate;
 
-    // --- In-memory State Tracking ---
     private static final Map<String, String> userState = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, String>> userData = new ConcurrentHashMap<>();
 
-    // State Constants
     private static final String STATE_START = "START";
     private static final String STATE_MENU = "MENU";
     private static final String STATE_ASK_NAME = "ASK_NAME";
     private static final String STATE_ASK_ADDRESS = "ASK_ADDRESS";
     private static final String STATE_COMPLETED = "COMPLETED";
 
-    // ---------------------------------------------------------------
-    // GET endpoint — health check
-    // ---------------------------------------------------------------
     @GetMapping("/messages/whatsapp")
     public String testWebhook() {
         return "Webhook working";
     }
 
-    // ---------------------------------------------------------------
-    // POST endpoint — main webhook
-    // ---------------------------------------------------------------
     @PostMapping("/messages/whatsapp")
     public ResponseEntity<Map<String, String>> receiveMessage(@RequestBody JsonNode body) {
         System.out.println("=== Webhook HIT ===");
         System.out.println(body.toPrettyString());
+
         try {
             JsonNode messageNode = body.path("data").path("message");
+
+            // -------------------------------------------------------
+            // PERMANENT FIX - ignore messages sent by AGENT (bot)
+            // -------------------------------------------------------
+            String sender = messageNode.has("sender")
+                    ? messageNode.get("sender").asText().trim()
+                    : "";
+
+            if (sender.equalsIgnoreCase("AGENT")) {
+                System.out.println("[SKIP] Outgoing bot message ignored. sender=AGENT");
+                Map<String, String> skip = new HashMap<>();
+                skip.put("status", "ignored - bot message");
+                return ResponseEntity.ok(skip);
+            }
 
             String phoneNumber = messageNode.has("phone_number")
                     ? messageNode.get("phone_number").asText().trim()
@@ -63,18 +71,25 @@ public class WebhookController {
             System.out.println("[Extracted] Sender  : " + senderName);
 
             if (phoneNumber.equals("Not present")) {
-                return ResponseEntity.badRequest().body(Map.of("status", "error", "message", "Phone number missing"));
+                Map<String, String> err = new HashMap<>();
+                err.put("status", "error");
+                err.put("message", "Phone number missing");
+                return ResponseEntity.badRequest().body(err);
             }
 
             String currentState = userState.getOrDefault(phoneNumber, STATE_START);
             String replyText = "";
             String nextState = currentState;
 
-            if (messageText.equalsIgnoreCase("Hi") || messageText.equalsIgnoreCase("Hello")
+            if (messageText.equalsIgnoreCase("Hi")
+                    || messageText.equalsIgnoreCase("Hello")
+                    || currentState.equals(STATE_START)
                     || currentState.equals(STATE_COMPLETED)) {
+
                 replyText = "Welcome to Yotindia!\nReply:\n1 Order Product\n2 View Products";
                 nextState = STATE_MENU;
                 userData.remove(phoneNumber);
+
             } else {
                 switch (currentState) {
                     case STATE_MENU:
@@ -82,10 +97,10 @@ public class WebhookController {
                             replyText = "Enter your name:";
                             nextState = STATE_ASK_NAME;
                         } else if (messageText.equals("2")) {
-                            replyText = "Available products: Leather Bag";
+                            replyText = "Available products:\n- Leather Bag";
                             nextState = STATE_MENU;
                         } else {
-                            replyText = "Please reply with 1 or 2";
+                            replyText = "Please reply with 1 or 2.";
                         }
                         break;
 
@@ -97,7 +112,10 @@ public class WebhookController {
 
                     case STATE_ASK_ADDRESS:
                         userData.computeIfAbsent(phoneNumber, k -> new HashMap<>()).put("address", messageText);
-                        replyText = "Order confirmed!\nThank you for ordering.";
+                        String savedName = userData.getOrDefault(phoneNumber, new HashMap<>())
+                                .getOrDefault("name", "Customer");
+                        replyText = "Order confirmed! Thank you, " + savedName
+                                + ", for ordering.\nWe will deliver to: " + messageText;
                         nextState = STATE_COMPLETED;
                         break;
 
@@ -113,25 +131,24 @@ public class WebhookController {
 
             sendAiSensyReply(phoneNumber, replyText);
 
-            return ResponseEntity.ok(Map.of("status", "ok"));
+            Map<String, String> success = new HashMap<>();
+            success.put("status", "ok");
+            return ResponseEntity.ok(success);
 
         } catch (Exception e) {
             System.out.println("Error: " + e.getMessage());
             e.printStackTrace();
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("status", "error", "message", e.getMessage()));
+            Map<String, String> err = new HashMap<>();
+            err.put("status", "error");
+            err.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(err);
         }
     }
 
-    // ---------------------------------------------------------------
-    // AiSensy Project Send Message API
-    // ---------------------------------------------------------------
     private void sendAiSensyReply(String phoneNumber, String replyText) {
         try {
-            // Hardcoded credentials as requested to fix startup errors
             String apiKey = "577d0643178707e58a3b0";
             String projectId = "69da0b7a7dec1710f8a9db08";
-
             String url = "https://apis.aisensy.com/project-apis/v1/project/" + projectId + "/messages";
 
             Map<String, Object> payload = new HashMap<>();
@@ -149,15 +166,13 @@ public class WebhookController {
 
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
 
-            System.out.println("[AiSensy] Sending...");
-            System.out.println("[AiSensy] Payload: " + payload);
-
+            System.out.println("[AiSensy] Sending to: " + phoneNumber);
             ResponseEntity<JsonNode> response = restTemplate.postForEntity(url, request, JsonNode.class);
-
-            System.out.println("[AiSensy] Response: " + response.getBody());
+            System.out.println("[AiSensy] Response Status : " + response.getStatusCode());
+            System.out.println("[AiSensy] Response Body   : " + response.getBody());
 
         } catch (Exception e) {
-            System.err.println("[AiSensy] Error");
+            System.err.println("[AiSensy] Failed to send: " + e.getMessage());
             e.printStackTrace();
         }
     }
