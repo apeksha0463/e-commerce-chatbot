@@ -38,14 +38,14 @@ public class WebhookController {
 
         try {
             JsonNode messageNode = body.path("data").path("message");
-
+            System.out.println("[Message Node] : " + messageNode);
             // -------------------------------------------------------
             // PERMANENT FIX - ignore messages sent by AGENT (bot)
             // -------------------------------------------------------
             String sender = messageNode.has("sender")
                     ? messageNode.get("sender").asText().trim()
                     : "";
-
+            System.out.println("[Sender] : " + sender);
             if (sender.equalsIgnoreCase("AGENT")) {
                 System.out.println("[SKIP] Outgoing bot message ignored. sender=AGENT");
                 Map<String, String> skip = new HashMap<>();
