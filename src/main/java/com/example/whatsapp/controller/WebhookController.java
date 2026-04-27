@@ -46,7 +46,7 @@ public class WebhookController {
                     ? messageNode.get("sender").asText().trim()
                     : "";
             System.out.println("[Sender] : " + sender);
-            if (sender.equalsIgnoreCase("AGENT")) {
+            if (sender.equalsIgnoreCase("AGENT") || sender.equalsIgnoreCase("API")) {
                 System.out.println("[SKIP] Outgoing bot message ignored. sender=AGENT");
                 Map<String, String> skip = new HashMap<>();
                 skip.put("status", "ignored - bot message");
