@@ -129,7 +129,7 @@ public class WebhookController {
     private void sendAiSensyReply(String phoneNumber, String replyText) {
         try {
             // Hardcoded credentials as requested to fix startup errors
-            String apiKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY5YjI1OWEyZWMxZTNhMTFhZTVlNzY3MyIsIm5hbWUiOiJ5b3RpbmRpYSBwdnQgbHRkIiwiYXBwTmFtZSI6IkFpU2Vuc3kiLCJjbGllbnRJZCI6IjY5YjI1OWEyZWMxZTNhMTFhZTVlNzY2ZSIsImFjdGl2ZVBsYW4iOiJGUkVFX0ZPUkVWRVIiLCJpYXQiOjE3NzMyOTYwMzR9.HwJnGz1fB2F2B32jZ6iMNu8kBBoAZ6DCv1YwKP_BuCU";
+            String apiKey = "577d0643178707e58a3b0";
             String projectId = "69da0b7a7dec1710f8a9db08";
 
             String url = "https://apis.aisensy.com/project-apis/v1/project/" + projectId + "/messages";
