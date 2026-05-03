@@ -10,6 +10,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 @CrossOrigin(origins = "*")
 @RestController
@@ -45,6 +46,11 @@ public class WebhookController {
     private static final String STATE_ORDER_PAYMENT = "ORDER_PAYMENT";
     private static final String STATE_ORDER_CONFIRM = "ORDER_CONFIRM";
 
+    // ─── Intent constants ─────────────────────────────────────────────────────
+    private enum Intent {
+        BROWSE, OFFERS, BUY, NAVIGATION, UNKNOWN
+    }
+
     // ─── In-memory state stores ───────────────────────────────────────────────
     private static final Map<String, String> userState = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> userData = new ConcurrentHashMap<>();
@@ -73,7 +79,11 @@ public class WebhookController {
             }
 
             String phone = msgNode.path("phone_number").asText("").trim();
-            String text = msgNode.path("message_content").path("text").asText("").trim();
+            String rawText = msgNode.path("message_content").path("text").asText("").trim();
+
+            // ── Input normalization: button payload OR text ───────────────
+            String buttonPayload = msgNode.path("message_content").path("button_payload").asText("").trim();
+            String text = buttonPayload.isEmpty() ? rawText : buttonPayload;
 
             System.out.println("[Phone]   : " + phone);
             System.out.println("[Message] : " + text);
@@ -87,9 +97,12 @@ public class WebhookController {
             String reply;
             String next = state;
 
+            // ── Normalized input for intent detection ────────────────────
+            String input = text.toLowerCase().trim();
+            Intent intent = detectIntent(input);
+
             // ── Global resets ────────────────────────────────────────────────
-            String textLower = text.toLowerCase().trim();
-            if (List.of("hi", "hello", "start", "menu", "back").contains(textLower)) {
+            if (intent == Intent.NAVIGATION) {
                 reply = buildMenuMessage(phone);
                 next = STATE_MENU;
                 userData.remove(phone);
@@ -99,14 +112,14 @@ public class WebhookController {
                 switch (state) {
 
                     case STATE_MENU: {
-                        if ("1".equals(text)) {
+                        if (intent == Intent.BROWSE) {
                             reply = fetchCategories(phone);
                             next = reply.startsWith("⚠️") ? STATE_MENU : STATE_CATEGORIES;
-                        } else if ("2".equals(text)) {
+                        } else if (intent == Intent.OFFERS) {
                             reply = fetchOffers();
                             next = STATE_MENU;
                         } else {
-                            reply = "Please reply with *1* to browse categories or *2* for offers.";
+                            reply = smartFallback(state);
                         }
                         break;
                     }
@@ -131,11 +144,18 @@ public class WebhookController {
                     }
 
                     case STATE_PRODUCT_DETAILS: {
-                        if ("1".equals(text)) {
-                            reply = "Great! Let's place your order. 🛒\n\nPlease enter your *Full Name*:";
-                            next = STATE_ORDER_NAME;
+                        if (intent == Intent.BUY) {
+                            // Check stock before allowing buy
+                            Boolean inStock = (Boolean) getUserData(phone).get("selectedInStock");
+                            if (inStock != null && !inStock) {
+                                reply = "❌ Sorry, this product is currently *out of stock*.\n\n"
+                                        + "Try browsing other products — type *browse* or *back*.";
+                            } else {
+                                reply = "Great! Let's place your order. 🛒\n\nPlease enter your *Full Name*:";
+                                next = STATE_ORDER_NAME;
+                            }
                         } else {
-                            reply = "Reply *1* to Buy Now or type *back* to return.";
+                            reply = smartFallback(state);
                         }
                         break;
                     }
@@ -150,26 +170,18 @@ public class WebhookController {
                     case STATE_ORDER_ADDRESS: {
                         getUserData(phone).put("orderAddress", text);
                         reply = "📍 Address saved!\n\nChoose *Payment Method*:\n\n"
-                                + "1️⃣  COD (Cash on Delivery)\n"
-                                + "2️⃣  UPI\n"
-                                + "3️⃣  Online / Card\n\n"
-                                + "_Reply with 1, 2, or 3._";
+                                + "💵  *COD* — Cash on Delivery\n"
+                                + "📱  *UPI* — UPI Payment\n"
+                                + "💳  *Online* — Card / Net Banking\n\n"
+                                + "_Type your preferred method (e.g. cod, upi, online)._";
                         next = STATE_ORDER_PAYMENT;
                         break;
                     }
 
                     case STATE_ORDER_PAYMENT: {
-                        Map<String, String> methods = new HashMap<>();
-                        methods.put("1", "COD");
-                        methods.put("cod", "COD");
-                        methods.put("2", "UPI");
-                        methods.put("upi", "UPI");
-                        methods.put("3", "Online/Card");
-                        methods.put("online", "Online/Card");
-
-                        String method = methods.get(textLower);
+                        String method = resolvePaymentMethod(input);
                         if (method == null) {
-                            reply = "Please reply with *1*, *2*, or *3* to choose payment.";
+                            reply = "Hmm, I didn't catch that. Please type *cod*, *upi*, or *online*.";
                         } else {
                             getUserData(phone).put("paymentMethod", method);
                             reply = buildOrderSummary(phone);
@@ -179,7 +191,7 @@ public class WebhookController {
                     }
 
                     case STATE_ORDER_CONFIRM: {
-                        if (textLower.contains("confirm")) {
+                        if (input.contains("confirm")) {
                             reply = confirmOrder(phone);
                             next = STATE_MENU;
                         } else {
@@ -191,6 +203,7 @@ public class WebhookController {
                     default: {
                         reply = buildMenuMessage(phone);
                         next = STATE_MENU;
+                        userData.remove(phone);
                     }
                 }
             }
@@ -258,15 +271,14 @@ public class WebhookController {
             String name = cat.path("name").asText("Category " + (i + 1));
             String id = cat.path("_id").asText(cat.path("id").asText(""));
             String slug = cat.path("seo").path("slug").asText(cat.path("slug").asText(""));
-            sb.append(i + 1).append(". ").append(name).append("\n");
+            sb.append("▸ ").append(name).append("\n");
             Map<String, String> m = new HashMap<>();
-            m.put("idx", String.valueOf(i + 1));
             m.put("id", id);
             m.put("slug", slug);
             m.put("name", name);
             cats.add(m);
         }
-        sb.append("\n_Reply with a number to explore._\n_Type *back* for main menu._");
+        sb.append("\n_Type a category name to explore._\n_Type *back* for main menu._");
         getUserData(phone).put("categories", cats.toString()); // store serialised
 
         // store structured list as JSON in userData
@@ -282,22 +294,13 @@ public class WebhookController {
     // ─── Handle category number selection ─────────────────────────────────────
     @SuppressWarnings("unchecked")
     private String handleCategorySelection(String phone, String text) {
-        int num;
-        try {
-            num = Integer.parseInt(text.trim());
-        } catch (NumberFormatException e) {
-            return "Please reply with the *number* of the category.";
-        }
-
         List<Map<String, String>> cats = getCatsFromState(phone, "categoriesJson");
         if (cats == null)
             return "Session expired. Type *hi* to start over.";
 
-        Map<String, String> cat = cats.stream()
-                .filter(c -> c.get("idx").equals(String.valueOf(num)))
-                .findFirst().orElse(null);
+        Map<String, String> cat = matchByName(cats, text);
         if (cat == null)
-            return "Invalid choice. Reply with a number from the list.";
+            return "I couldn't find that category. Try typing a name from the list above, or type *back*.";
 
         // Try sub-categories
         JsonNode subData = bgsGet("/product/categories/" + cat.get("id") + "/children");
@@ -321,15 +324,14 @@ public class WebhookController {
             String name = s.path("name").asText("Sub " + (i + 1));
             String id = s.path("_id").asText(s.path("id").asText(""));
             String slug = s.path("seo").path("slug").asText(s.path("slug").asText(""));
-            sb.append(i + 1).append(". ").append(name).append("\n");
+            sb.append("▸ ").append(name).append("\n");
             Map<String, String> m = new HashMap<>();
-            m.put("idx", String.valueOf(i + 1));
             m.put("id", id);
             m.put("slug", slug);
             m.put("name", name);
             subs.add(m);
         }
-        sb.append("\n_Reply with a number._\n_Type *back* for main menu._");
+        sb.append("\n_Type a sub-category name to explore._\n_Type *back* for main menu._");
 
         try {
             getUserData(phone).put("subCatsJson", objectMapper.writeValueAsString(subs));
@@ -342,22 +344,13 @@ public class WebhookController {
 
     // ─── Handle sub-category number selection ─────────────────────────────────
     private String handleSubCategorySelection(String phone, String text) {
-        int num;
-        try {
-            num = Integer.parseInt(text.trim());
-        } catch (NumberFormatException e) {
-            return "Please reply with the *number* shown.";
-        }
-
         List<Map<String, String>> subs = getCatsFromState(phone, "subCatsJson");
         if (subs == null)
             return "Session expired. Type *hi* to start over.";
 
-        Map<String, String> sub = subs.stream()
-                .filter(s -> s.get("idx").equals(String.valueOf(num)))
-                .findFirst().orElse(null);
+        Map<String, String> sub = matchByName(subs, text);
         if (sub == null)
-            return "Invalid choice. Reply with a number from the list.";
+            return "I couldn't find that sub-category. Try typing a name from the list above, or type *back*.";
 
         return fetchProducts(phone, sub.get("slug"), sub.get("name"));
     }
@@ -386,18 +379,18 @@ public class WebhookController {
                     ? p.path("thumbnails").get(0).asText("")
                     : "";
 
-            sb.append(i + 1).append(". *").append(name).append("* — ₹").append(price)
-                    .append(" | ").append(inSt ? "✅ In Stock" : "❌ Out of Stock").append("\n");
+            sb.append("*").append(name).append("*\n")
+                    .append("   💰 ₹").append(price)
+                    .append(" | ").append(inSt ? "✅ In Stock" : "❌ Out of Stock").append("\n\n");
 
             Map<String, String> m = new HashMap<>();
-            m.put("idx", String.valueOf(i + 1));
             m.put("id", id);
             m.put("name", name);
             m.put("price", price);
             m.put("thumb", thumb);
             prods.add(m);
         }
-        sb.append("\n_Reply with a number to see details._\n_Type *back* for main menu._");
+        sb.append("_Type the product name to view details._\n_Type *back* for main menu._");
 
         try {
             getUserData(phone).put("productsJson", objectMapper.writeValueAsString(prods));
@@ -408,24 +401,15 @@ public class WebhookController {
         return sb.toString();
     }
 
-    // ─── Handle product number selection ──────────────────────────────────────
+    // ─── Handle product name-based selection ───────────────────────────────────
     private String handleProductSelection(String phone, String text) {
-        int num;
-        try {
-            num = Integer.parseInt(text.trim());
-        } catch (NumberFormatException e) {
-            return "Please reply with the *number* shown.";
-        }
-
         List<Map<String, String>> prods = getCatsFromState(phone, "productsJson");
         if (prods == null)
             return "Session expired. Type *hi* to start over.";
 
-        Map<String, String> prod = prods.stream()
-                .filter(p -> p.get("idx").equals(String.valueOf(num)))
-                .findFirst().orElse(null);
+        Map<String, String> prod = matchByName(prods, text);
         if (prod == null)
-            return "Invalid choice. Reply with a number from the list.";
+            return "I couldn't find that product. Try typing a name from the list above, or type *back*.";
 
         // Fetch full product details
         JsonNode details = bgsGet("/product/items/" + prod.get("id"));
@@ -440,15 +424,34 @@ public class WebhookController {
         if (desc.length() > 250)
             desc = desc.substring(0, 250) + "...";
 
+        // Handle variants (basic)
+        String variantInfo = "";
+        if (details != null && details.has("variants") && details.path("variants").isArray()
+                && details.path("variants").size() > 0) {
+            StringBuilder vb = new StringBuilder("\n🎨 *Variants available:*\n");
+            for (JsonNode v : details.path("variants")) {
+                vb.append("  ▸ ").append(v.path("name").asText(v.path("label").asText(""))).append("\n");
+            }
+            vb.append("_Type a variant name (e.g. size or color) to select._\n");
+            variantInfo = vb.toString();
+        }
+
         getUserData(phone).put("selectedName", name);
         getUserData(phone).put("selectedPrice", price);
+        getUserData(phone).put("selectedInStock", inSt);
         userState.put(phone, STATE_PRODUCT_DETAILS);
+
+        String stockLine = inSt ? "✅ In Stock" : "❌ Out of Stock";
+        String buyPrompt = inSt
+                ? "Type *buy* to order 🛒"
+                : "⚠️ _This product is currently out of stock. Browse other products by typing *back*._";
 
         return "*" + name + "*\n\n"
                 + "💰 Price : ₹" + price + "\n"
-                + "📦 Stock : " + (inSt ? "✅ In Stock" : "❌ Out of Stock") + "\n\n"
-                + "📝 " + desc + "\n\n"
-                + "Reply *1* to *Buy Now* 🛒\n"
+                + "📦 Stock : " + stockLine + "\n\n"
+                + "📝 " + desc + "\n"
+                + variantInfo + "\n"
+                + buyPrompt + "\n"
                 + "Type *back* to return.";
     }
 
@@ -477,7 +480,7 @@ public class WebhookController {
             }
             sb.append("\n");
         }
-        sb.append("_Type *1* to browse categories or *back* for menu._");
+        sb.append("_Type *browse* to see categories or *back* for menu._");
         return sb.toString();
     }
 
@@ -521,9 +524,9 @@ public class WebhookController {
                 ? "🎁 *New User Offer!* Use code *WELCOME20* for 20% off!\n\n"
                 : "";
         return prefix + "Welcome to *YotMart*! 🛍️\n\nWhat would you like to do?\n\n"
-                + "1️⃣  Browse Categories\n"
-                + "2️⃣  View Offers / Coupons\n\n"
-                + "_Reply with a number._";
+                + "🛒  *Browse* — View product categories\n"
+                + "🎉  *Offers* — View deals & coupons\n\n"
+                + "_You can type things like: *browse*, *show bags*, *view offers*, *laptop bags*_";
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -586,6 +589,84 @@ public class WebhookController {
                     objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class));
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** Match user input against a list of items by name (case-insensitive contains). */
+    private Map<String, String> matchByName(List<Map<String, String>> items, String input) {
+        if (items == null || input == null) return null;
+        String lower = input.toLowerCase().trim();
+        // Exact match first
+        for (Map<String, String> item : items) {
+            if (item.get("name").toLowerCase().equals(lower)) return item;
+        }
+        // Contains match
+        for (Map<String, String> item : items) {
+            if (item.get("name").toLowerCase().contains(lower)) return item;
+        }
+        // Reverse contains — input contains item name
+        for (Map<String, String> item : items) {
+            if (lower.contains(item.get("name").toLowerCase())) return item;
+        }
+        return null;
+    }
+
+    /** Detect user intent from normalized input. */
+    private Intent detectIntent(String input) {
+        if (input == null) return Intent.UNKNOWN;
+        // Navigation
+        if (List.of("hi", "hello", "hey", "start", "menu", "back", "home", "reset").contains(input))
+            return Intent.NAVIGATION;
+        // Offers
+        if (input.contains("offer") || input.contains("discount") || input.contains("coupon")
+                || input.contains("deal") || input.contains("promo"))
+            return Intent.OFFERS;
+        // Buy
+        if (input.contains("buy") || input.contains("order") || input.contains("purchase")
+                || input.contains("checkout"))
+            return Intent.BUY;
+        // Browse — broad category keywords
+        if (input.contains("browse") || input.contains("categor") || input.contains("shop")
+                || input.contains("show") || input.contains("view") || input.contains("explore")
+                || input.contains("bag") || input.contains("backpack") || input.contains("laptop")
+                || input.contains("college") || input.contains("school") || input.contains("product"))
+            return Intent.BROWSE;
+        return Intent.UNKNOWN;
+    }
+
+    /** Resolve payment method from user input text. */
+    private String resolvePaymentMethod(String input) {
+        if (input.contains("cod") || input.contains("cash")) return "COD";
+        if (input.contains("upi")) return "UPI";
+        if (input.contains("online") || input.contains("card") || input.contains("net")) return "Online/Card";
+        return null;
+    }
+
+    /** Smart fallback: give contextual help instead of an error. */
+    private String smartFallback(String state) {
+        switch (state) {
+            case STATE_MENU:
+                return "I didn't quite get that. 🤔\n\n"
+                        + "Try typing:\n"
+                        + "▸ *browse* — to see product categories\n"
+                        + "▸ *offers* — to view current deals\n"
+                        + "▸ *back* — to return to the main menu";
+            case STATE_CATEGORIES:
+                return "Please type the *name* of a category from the list above.\n"
+                        + "Or type *back* to return to the menu.";
+            case STATE_SUBCATEGORIES:
+                return "Please type the *name* of a sub-category from the list above.\n"
+                        + "Or type *back* to return to the menu.";
+            case STATE_PRODUCTS:
+                return "Please type the *product name* from the list above to view details.\n"
+                        + "Or type *back* to return to the menu.";
+            case STATE_PRODUCT_DETAILS:
+                return "You can:\n"
+                        + "▸ Type *buy* to place an order\n"
+                        + "▸ Type *back* to browse other products";
+            default:
+                return "I'm not sure what you mean. 🤔\n"
+                        + "Type *hi* or *menu* to start fresh.";
         }
     }
 
