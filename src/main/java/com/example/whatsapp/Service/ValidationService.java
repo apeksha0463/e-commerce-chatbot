@@ -1,0 +1,55 @@
+package com.example.whatsapp.service;
+
+import org.springframework.stereotype.Service;
+
+/**
+ * Validates address and pincode before order creation.
+ * Extend isServiceable() to call a real logistics API if available.
+ */
+@Service
+public class ValidationService {
+
+    private static final int MIN_ADDRESS_LENGTH = 10;
+    private static final int PINCODE_LENGTH     = 6;
+
+    // ── Address ──────────────────────────────────────────────────────────────
+
+    public boolean isAddressValid(String address) {
+        return address != null
+                && address.trim().length() >= MIN_ADDRESS_LENGTH;
+    }
+
+    public String addressErrorMessage() {
+        return "Please enter a *valid delivery address* (at least "
+                + MIN_ADDRESS_LENGTH + " characters).\n"
+                + "Example: _12, Main St, Mumbai, Maharashtra_";
+    }
+
+    // ── Pincode ───────────────────────────────────────────────────────────────
+
+    public boolean isPincodeValid(String pincode) {
+        return pincode != null
+                && pincode.trim().matches("\\d{" + PINCODE_LENGTH + "}");
+    }
+
+    public String pincodeErrorMessage() {
+        return "Please enter a valid *6-digit pincode* (numbers only).\n"
+                + "Example: _400001_";
+    }
+
+    // ── Serviceability ────────────────────────────────────────────────────────
+
+    /**
+     * Stub: always serviceable. Replace with real logistics API call.
+     * Example: GET https://api.logistics.com/serviceable?pincode={pincode}
+     */
+    public boolean isServiceable(String pincode) {
+        // TODO: call real logistics API
+        return true;
+    }
+
+    public String serviceabilityErrorMessage(String pincode) {
+        return "Sorry, we currently do not deliver to pincode *" + pincode + "*.\n"
+                + "Please enter a different pincode or choose *COD* if available.";
+    }
+}
