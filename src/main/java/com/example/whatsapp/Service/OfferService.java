@@ -47,7 +47,8 @@ public class OfferService {
             log.info("[OfferService] No active offers found.");
             return "No active offers at the moment.\n"
                     + "Check back soon for great deals.\n\n"
-                    + "_Type *browse* to explore products or *back* for main menu._";
+                    + "0. Main Menu\n\n"
+                    + "_Please reply with 0._";
         }
 
         StringBuilder sb = new StringBuilder("*Current Offers & Deals:*\n\n");
@@ -61,7 +62,7 @@ public class OfferService {
             String dval  = o.path("discountValue").asText("");
             String minOrd = o.path("minOrderValue").asText(o.path("minimumOrderAmount").asText(""));
 
-            sb.append("━━━━━━━━━━━━━━━━\n");
+            sb.append("----------------\n");
             if (!title.isEmpty()) sb.append("*").append(title).append("*\n");
             sb.append("Code: *").append(code).append("*\n");
 
@@ -74,8 +75,9 @@ public class OfferService {
             if (!desc.isEmpty())   sb.append("Note: ").append(desc).append("\n");
             sb.append("\n");
         }
-        sb.append("━━━━━━━━━━━━━━━━\n");
-        sb.append("_Type *browse* to shop or *back* for main menu._");
+        sb.append("----------------\n");
+        sb.append("0. Main Menu\n\n");
+        sb.append("_Please reply with 0._");
         return sb.toString();
     }
 
