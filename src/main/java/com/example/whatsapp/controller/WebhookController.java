@@ -36,7 +36,7 @@ public class WebhookController {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // â”€â”€â”€ Config from application.properties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Config from application.properties ---------------------------------
     @Value("${bgs.base-url:https://be.bgsinfotech.com}")
     private String bgsBaseUrl;
 
@@ -49,7 +49,7 @@ public class WebhookController {
     @Value("${aisensy.project-id:69da0b7a7dec1710f8a9db08}")
     private String aisensyProjectId;
 
-    // â”€â”€â”€ State constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- State constants ----------------------------------------------------
     private static final String STATE_START = "START";
     private static final String STATE_MENU = "MENU";
     private static final String STATE_CATEGORIES = "CATEGORIES";
@@ -67,23 +67,18 @@ public class WebhookController {
     private static final String STATE_ORDER_PAYMENT = "ORDER_PAYMENT";
     private static final String STATE_ORDER_CONFIRM = "ORDER_CONFIRM";
 
-    // â”€â”€â”€ Intent constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    private enum Intent {
-        BROWSE, OFFERS, BUY, NAVIGATION, UNKNOWN
-    }
-
-    // â”€â”€â”€ In-memory state stores â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- In-memory state stores ---------------------------------------------
     private static final Map<String, String> userState = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> userData = new ConcurrentHashMap<>();
     private static final Set<String> verifiedUsers = ConcurrentHashMap.newKeySet();
 
-    // â”€â”€â”€ GET /messages/whatsapp â€” health check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- GET /messages/whatsapp - health check ------------------------------
     @GetMapping("/messages/whatsapp")
     public String testWebhook() {
-        return "Webhook is running âœ…";
+        return "Webhook is running";
     }
 
-    // â”€â”€â”€ POST /messages/whatsapp â€” main handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- POST /messages/whatsapp - main handler -----------------------------
     @PostMapping("/messages/whatsapp")
     public ResponseEntity<Map<String, String>> receiveMessage(@RequestBody JsonNode body) {
         log.info("=== Webhook HIT ===");
@@ -100,7 +95,6 @@ public class WebhookController {
             String phone = msgNode.path("phone_number").asText("").trim();
             String rawText = msgNode.path("message_content").path("text").asText("").trim();
 
-            // â”€â”€ Input normalization: button payload OR text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             String buttonPayload = msgNode.path("message_content").path("button_payload").asText("").trim();
             String text = buttonPayload.isEmpty() ? rawText : buttonPayload;
 
@@ -111,145 +105,207 @@ public class WebhookController {
             String reply;
             String next = state;
 
-            // â”€â”€ Normalized input for intent detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             String input = text.toLowerCase().trim();
-            Intent intent = detectIntent(input);
 
-            // â”€â”€ Global resets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            if (intent == Intent.NAVIGATION) {
+            // --- Global resets ---
+            if (input.equals("0") || input.equals("hi") || input.equals("hello") || input.equals("menu")) {
                 reply = buildMenuMessage(phone);
                 next = STATE_MENU;
                 userData.remove(phone);
             } else {
-                // â”€â”€ State machine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // --- State machine ---
                 switch (state) {
 
                     case STATE_MENU: {
-                        if (intent == Intent.BROWSE) {
+                        if (input.equals("1")) {
                             reply = fetchCategories(phone);
-                            next = reply.startsWith("âš ï¸") ? STATE_MENU : STATE_CATEGORIES;
-                        } else if (intent == Intent.OFFERS) {
+                            next = reply.contains("unavailable") ? STATE_MENU : STATE_CATEGORIES;
+                        } else if (input.equals("2")) {
                             reply = offerService.fetchActiveOffersMessage();
                             next = STATE_MENU;
                         } else {
-                            reply = smartFallback(state);
+                            reply = "Please reply with a valid number (1 or 2).";
                         }
                         break;
                     }
 
                     case STATE_CATEGORIES: {
-                        reply = handleCategorySelection(phone, text);
-                        next = userState.getOrDefault(phone, STATE_CATEGORIES);
+                        if (input.equals("9")) {
+                            reply = buildMenuMessage(phone);
+                            next = STATE_MENU;
+                        } else {
+                            reply = handleCategorySelection(phone, text);
+                            next = userState.getOrDefault(phone, STATE_CATEGORIES);
+                        }
                         break;
                     }
 
                     case STATE_SUBCATEGORIES: {
-                        reply = handleSubCategorySelection(phone, text);
-                        next = userState.getOrDefault(phone, STATE_SUBCATEGORIES);
+                        if (input.equals("9")) {
+                            reply = fetchCategories(phone);
+                            next = STATE_CATEGORIES;
+                        } else {
+                            reply = handleSubCategorySelection(phone, text);
+                            next = userState.getOrDefault(phone, STATE_SUBCATEGORIES);
+                        }
                         break;
                     }
 
                     case STATE_PRODUCTS: {
-                        reply = handleProductSelection(phone, text);
-                        next = userState.getOrDefault(phone, STATE_PRODUCTS);
+                        if (input.equals("9")) {
+                            String parentCatId = (String) getUserData(phone).get("lastCategoryId");
+                            if (parentCatId != null) {
+                                JsonNode subData = bgsGet("/product/categories/" + parentCatId + "/children");
+                                JsonNode subList = resolveList(subData);
+                                if (subList != null && subList.size() > 0) {
+                                    reply = buildSubCategoryResponse(phone, subList);
+                                    next = STATE_SUBCATEGORIES;
+                                } else {
+                                    reply = fetchCategories(phone);
+                                    next = STATE_CATEGORIES;
+                                }
+                            } else {
+                                reply = fetchCategories(phone);
+                                next = STATE_CATEGORIES;
+                            }
+                        } else {
+                            reply = handleProductSelection(phone, text);
+                            next = userState.getOrDefault(phone, STATE_PRODUCTS);
+                        }
                         break;
                     }
 
                     case STATE_PRODUCT_DETAILS: {
-                        if (intent == Intent.BUY) {
+                        if (input.equals("9")) {
+                            String lastSlug = (String) getUserData(phone).get("lastSlug");
+                            String lastName = (String) getUserData(phone).get("lastCategoryName");
+                            reply = fetchProducts(phone, lastSlug, lastName);
+                            next = STATE_PRODUCTS;
+                        } else if (input.equals("1")) {
                             // Live stock re-check
                             String prodId = (String) getUserData(phone).get("selectedId");
                             JsonNode details = bgsGet("/product/items/" + prodId);
                             boolean inStock = isProductInStock(details);
                             
                             if (!inStock) {
-                                reply = "âŒ Sorry, this product is currently *out of stock*.\n\n"
-                                        + "Try browsing other products â€” type *browse* or *back*.";
+                                reply = "Sorry, this product is currently *out of stock*.\n\n"
+                                        + "Type 9 for Previous Menu or 0 for Main Menu.";
                             } else {
-                                // User Authentication
                                 if (!verifiedUsers.contains(phone)) {
                                     String otp = String.format("%04d", new Random().nextInt(10000));
                                     getUserData(phone).put("otp", otp);
-                                    reply = "ðŸ”’ *Verification Required*\n\n"
+                                    reply = "*Verification Required*\n\n"
                                           + "We have sent a 4-digit OTP to your number. For testing, your OTP is: *" + otp + "*\n\n"
                                           + "Please enter the OTP to continue your order:";
                                     next = STATE_OTP_VERIFY;
                                 } else {
-                                    reply = "Great! Let's place your order. ðŸ›’\n\nPlease enter your *Full Name*:";
+                                    reply = "Great! Let's place your order.\n\nPlease enter your *Full Name*:";
                                     next = STATE_ORDER_NAME;
                                 }
                             }
                         } else {
-                            reply = smartFallback(state);
+                            reply = "Please type 1 to Buy, 9 for Previous Menu, or 0 for Main Menu.";
                         }
                         break;
                     }
 
                     case STATE_OTP_VERIFY: {
-                        String savedOtp = (String) getUserData(phone).get("otp");
-                        if (input.equals(savedOtp)) {
-                            verifiedUsers.add(phone);
-                            reply = "âœ… Number verified successfully!\n\nPlease enter your *Full Name* for the order:";
-                            next = STATE_ORDER_NAME;
+                        if (input.equals("9")) {
+                            String lastSlug = (String) getUserData(phone).get("lastSlug");
+                            String lastName = (String) getUserData(phone).get("lastCategoryName");
+                            reply = fetchProducts(phone, lastSlug, lastName);
+                            next = STATE_PRODUCTS;
                         } else {
-                            reply = "âŒ Incorrect OTP. Please try again or type *back* to cancel.";
+                            String savedOtp = (String) getUserData(phone).get("otp");
+                            if (input.equals(savedOtp)) {
+                                verifiedUsers.add(phone);
+                                reply = "Number verified successfully!\n\nPlease enter your *Full Name* for the order:";
+                                next = STATE_ORDER_NAME;
+                            } else {
+                                reply = "Incorrect OTP. Please try again or type 9 to cancel and go back.";
+                            }
                         }
                         break;
                     }
 
                     case STATE_ORDER_NAME: {
-                        getUserData(phone).put("orderName", text);
-                        reply = "âœ… Got it!\n\nPlease enter your *6-digit Delivery Pincode*:";
-                        next = STATE_ORDER_PINCODE;
+                        if (input.equals("9")) {
+                            String lastSlug = (String) getUserData(phone).get("lastSlug");
+                            String lastName = (String) getUserData(phone).get("lastCategoryName");
+                            reply = fetchProducts(phone, lastSlug, lastName);
+                            next = STATE_PRODUCTS;
+                        } else {
+                            getUserData(phone).put("orderName", text);
+                            reply = "Got it!\n\nPlease enter your *6-digit Delivery Pincode*:";
+                            next = STATE_ORDER_PINCODE;
+                        }
                         break;
                     }
 
                     case STATE_ORDER_PINCODE: {
-                        if (!validationService.isPincodeValid(input)) {
+                        if (input.equals("9")) {
+                            reply = "Please enter your *Full Name*:";
+                            next = STATE_ORDER_NAME;
+                        } else if (!validationService.isPincodeValid(input)) {
                             reply = validationService.pincodeErrorMessage();
                         } else if (!validationService.isServiceable(input)) {
                             reply = validationService.serviceabilityErrorMessage(input);
                         } else {
                             getUserData(phone).put("orderPincode", input);
-                            reply = "ðŸ“ Pincode serviceable!\n\nNow please enter your *Full Delivery Address* (including house number, street, etc.):";
+                            reply = "Pincode serviceable!\n\nNow please enter your *Full Delivery Address* (including house number, street, etc.):";
                             next = STATE_ORDER_ADDRESS;
                         }
                         break;
                     }
 
                     case STATE_ORDER_ADDRESS: {
-                        if (!validationService.isAddressValid(text)) {
+                        if (input.equals("9")) {
+                            reply = "Please enter your *6-digit Delivery Pincode*:";
+                            next = STATE_ORDER_PINCODE;
+                        } else if (!validationService.isAddressValid(text)) {
                             reply = validationService.addressErrorMessage();
                         } else {
                             getUserData(phone).put("orderAddress", text);
-                            reply = "ðŸ“ Address saved!\n\nChoose *Payment Method*:\n\n"
-                                    + "ðŸ’µ  *COD* â€” Cash on Delivery\n"
-                                    + "ðŸ“±  *UPI* â€” UPI Payment\n"
-                                    + "ðŸ’³  *Online* â€” Card / Net Banking\n\n"
-                                    + "_Type your preferred method (e.g. cod, upi, online)._";
+                            reply = "Address saved!\n\nChoose *Payment Method*:\n\n"
+                                    + "1. COD (Cash on Delivery)\n"
+                                    + "2. UPI Payment\n"
+                                    + "3. Online (Card / Net Banking)\n\n"
+                                    + "_Please reply with 1, 2, or 3._";
                             next = STATE_ORDER_PAYMENT;
                         }
                         break;
                     }
 
                     case STATE_ORDER_PAYMENT: {
-                        String method = resolvePaymentMethod(input);
-                        if (method == null) {
-                            reply = "Hmm, I didn't catch that. Please type *cod*, *upi*, or *online*.";
+                        if (input.equals("9")) {
+                            reply = "Now please enter your *Full Delivery Address* (including house number, street, etc.):";
+                            next = STATE_ORDER_ADDRESS;
                         } else {
-                            getUserData(phone).put("paymentMethod", method);
-                            reply = buildOrderSummary(phone);
-                            next = STATE_ORDER_CONFIRM;
+                            String method = resolvePaymentMethod(input);
+                            if (method == null) {
+                                reply = "Please reply with a valid number (1, 2, or 3).";
+                            } else {
+                                getUserData(phone).put("paymentMethod", method);
+                                reply = buildOrderSummary(phone);
+                                next = STATE_ORDER_CONFIRM;
+                            }
                         }
                         break;
                     }
 
                     case STATE_ORDER_CONFIRM: {
-                        if (input.contains("confirm")) {
+                        if (input.equals("9")) {
+                            reply = "Choose *Payment Method*:\n\n"
+                                    + "1. COD (Cash on Delivery)\n"
+                                    + "2. UPI Payment\n"
+                                    + "3. Online (Card / Net Banking)\n\n"
+                                    + "_Please reply with 1, 2, or 3._";
+                            next = STATE_ORDER_PAYMENT;
+                        } else if (input.equals("1")) {
                             reply = processFinalOrder(phone);
                             next = reply.contains("could not be generated") ? STATE_ORDER_PAYMENT : STATE_MENU;
                         } else {
-                            reply = "Type *confirm* to place the order or *back* to cancel.";
+                            reply = "Please type 1 to confirm the order, 9 to go back, or 0 to cancel and return to main menu.";
                         }
                         break;
                     }
@@ -274,9 +330,9 @@ public class WebhookController {
         }
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     // ORDER PLACEMENT LOGIC
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     
     private String processFinalOrder(String phone) {
         Map<String, Object> d = getUserData(phone);
@@ -291,7 +347,7 @@ public class WebhookController {
         // 1. Re-validate Stock (CRITICAL)
         JsonNode details = bgsGet("/product/items/" + prodId);
         if (!isProductInStock(details)) {
-            return "âŒ We're sorry, but this product just went *out of stock*.\nYour order could not be placed. Type *browse* to view other products.";
+            return "We're sorry, but this product just went *out of stock*.\nYour order could not be placed. Type 0 for Main Menu to view other products.";
         }
 
         // 2. Create Order in Backend
@@ -300,13 +356,13 @@ public class WebhookController {
 
         if (!orderRes.success) {
             log.severe("Order creation failed for " + phone + ": " + orderRes.errorMessage);
-            return "âš ï¸ Oops! Something went wrong while creating your order. Please try again later or contact support.";
+            return "Oops! Something went wrong while creating your order. Please try again later or contact support.";
         }
 
         String orderId = orderRes.orderId;
-        String msg = "ðŸŽ‰ *Order Placed Successfully!*\n\n"
-                + "ðŸ“¦ Order ID : #" + orderId + "\n"
-                + "Thank you for shopping with *YotMart*! ðŸ›ï¸";
+        String msg = "*Order Placed Successfully!*\n\n"
+                + "Order ID : #" + orderId + "\n"
+                + "Thank you for shopping with *YotMart*!";
 
         // 3. Generate Payment Link if not COD
         if (!"COD".equals(payment)) {
@@ -314,9 +370,13 @@ public class WebhookController {
                     orderId, phone, finalPrice, payment);
             
             if (payRes.success) {
-                msg += "\n\nðŸ”— *Please complete your payment here:*\n" + payRes.paymentLink;
+                msg += "\n\n*Please complete your payment here:*\n" + payRes.paymentLink;
             } else {
-                return "âš ï¸ Order created, but *Payment link could not be generated*. Try again or choose another method.\n\nType your preferred method (*cod*, *upi*, *online*):";
+                return "Order created, but *Payment link could not be generated*. Try again or choose another method.\n\n"
+                     + "1. COD (Cash on Delivery)\n"
+                     + "2. UPI Payment\n"
+                     + "3. Online (Card / Net Banking)\n\n"
+                     + "_Please reply with 1, 2, or 3._";
             }
         }
 
@@ -324,9 +384,9 @@ public class WebhookController {
         return msg;
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     // BGS API HELPER METHODS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
 
     private HttpHeaders bgsHeaders() {
         HttpHeaders h = new HttpHeaders();
@@ -347,42 +407,44 @@ public class WebhookController {
         }
     }
 
-    // â”€â”€â”€ Fetch & format categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Fetch & format categories ------------------------------------------
     private String fetchCategories(String phone) {
         JsonNode data = bgsGet("/product/categories");
-        if (data == null) return "âš ï¸ Service temporarily unavailable. Please try again later.";
+        if (data == null) return "Service temporarily unavailable. Please try again later.";
 
         JsonNode list = resolveList(data);
         if (list == null || !list.isArray() || list.size() == 0) {
             return "No categories available right now.";
         }
 
-        StringBuilder sb = new StringBuilder("ðŸ“‚ *Available Categories:*\n\n");
+        StringBuilder sb = new StringBuilder("*Available Categories:*\n\n");
         List<Map<String, String>> cats = new ArrayList<>();
-        int max = Math.min(list.size(), 5);
+        int max = Math.min(list.size(), 8);
 
         for (int i = 0; i < max; i++) {
             JsonNode cat = list.get(i);
             String name = cat.path("name").asText("Category " + (i + 1));
             String id = cat.path("_id").asText(cat.path("id").asText(""));
             String slug = cat.path("seo").path("slug").asText(cat.path("slug").asText(""));
-            sb.append("â–¸ ").append(name).append("\n");
-            cats.add(Map.of("id", id, "slug", slug, "name", name));
+            sb.append((i + 1)).append(". ").append(name).append("\n");
+            cats.add(Map.of("index", String.valueOf(i + 1), "id", id, "slug", slug, "name", name));
         }
-        sb.append("\n_Type a category name to explore._\n_Type *back* for main menu._");
+        sb.append("\n9. Previous Menu\n0. Main Menu\n\n_Please reply with a number._");
 
         try { getUserData(phone).put("categoriesJson", objectMapper.writeValueAsString(cats)); } catch (Exception ignored) {}
         userState.put(phone, STATE_CATEGORIES);
         return sb.toString();
     }
 
-    // â”€â”€â”€ Handle category selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Handle category selection -----------------------------------------
     private String handleCategorySelection(String phone, String text) {
         List<Map<String, String>> cats = getListFromState(phone, "categoriesJson");
-        if (cats == null) return "Session expired. Type *hi* to start over.";
+        if (cats == null) return "Session expired. Type 0 to start over.";
 
-        Map<String, String> cat = matchByName(cats, text);
-        if (cat == null) return "I couldn't find that category. Try typing a name from the list above, or type *back*.";
+        Map<String, String> cat = matchByIndex(cats, text);
+        if (cat == null) return "Please reply with a valid number from the list above.";
+
+        getUserData(phone).put("lastCategoryId", cat.get("id"));
 
         JsonNode subData = bgsGet("/product/categories/" + cat.get("id") + "/children");
         JsonNode subList = resolveList(subData);
@@ -393,51 +455,53 @@ public class WebhookController {
         return fetchProducts(phone, cat.get("slug"), cat.get("name"));
     }
 
-    // â”€â”€â”€ Fetch & format sub-categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Fetch & format sub-categories --------------------------------------
     private String buildSubCategoryResponse(String phone, JsonNode list) {
-        StringBuilder sb = new StringBuilder("ðŸ“ *Sub-categories:*\n\n");
+        StringBuilder sb = new StringBuilder("*Sub-categories:*\n\n");
         List<Map<String, String>> subs = new ArrayList<>();
-        int max = Math.min(list.size(), 5);
+        int max = Math.min(list.size(), 8);
 
         for (int i = 0; i < max; i++) {
             JsonNode s = list.get(i);
             String name = s.path("name").asText("Sub " + (i + 1));
             String id = s.path("_id").asText(s.path("id").asText(""));
             String slug = s.path("seo").path("slug").asText(s.path("slug").asText(""));
-            sb.append("â–¸ ").append(name).append("\n");
-            subs.add(Map.of("id", id, "slug", slug, "name", name));
+            sb.append((i + 1)).append(". ").append(name).append("\n");
+            subs.add(Map.of("index", String.valueOf(i + 1), "id", id, "slug", slug, "name", name));
         }
-        sb.append("\n_Type a sub-category name to explore._\n_Type *back* for main menu._");
+        sb.append("\n9. Previous Menu\n0. Main Menu\n\n_Please reply with a number._");
 
         try { getUserData(phone).put("subCatsJson", objectMapper.writeValueAsString(subs)); } catch (Exception ignored) {}
         userState.put(phone, STATE_SUBCATEGORIES);
         return sb.toString();
     }
 
-    // â”€â”€â”€ Handle sub-category selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Handle sub-category selection ---------------------------------------
     private String handleSubCategorySelection(String phone, String text) {
         List<Map<String, String>> subs = getListFromState(phone, "subCatsJson");
-        if (subs == null) return "Session expired. Type *hi* to start over.";
+        if (subs == null) return "Session expired. Type 0 to start over.";
 
-        Map<String, String> sub = matchByName(subs, text);
-        if (sub == null) return "I couldn't find that sub-category. Try typing a name from the list above, or type *back*.";
+        Map<String, String> sub = matchByIndex(subs, text);
+        if (sub == null) return "Please reply with a valid number from the list above.";
 
         return fetchProducts(phone, sub.get("slug"), sub.get("name"));
     }
 
-    // â”€â”€â”€ Fetch & format product list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Fetch & format product list -----------------------------------------
     private String fetchProducts(String phone, String slug, String categoryName) {
+        getUserData(phone).put("lastSlug", slug);
+        getUserData(phone).put("lastCategoryName", categoryName);
+
         JsonNode data = bgsGet("/product/items/category/slug/" + slug);
         JsonNode list = resolveList(data);
 
         if (list == null || list.size() == 0) {
-            userState.put(phone, STATE_MENU);
-            return "No products found in *" + categoryName + "*.\n_Type *back* to browse other categories._";
+            return "No products found in *" + categoryName + "*.\n\n9. Previous Menu\n0. Main Menu";
         }
 
-        StringBuilder sb = new StringBuilder("ðŸ›ï¸ *Products in " + categoryName + ":*\n\n");
+        StringBuilder sb = new StringBuilder("*Products in " + categoryName + ":*\n\n");
         List<Map<String, String>> prods = new ArrayList<>();
-        int max = Math.min(list.size(), 5);
+        int max = Math.min(list.size(), 8);
 
         for (int i = 0; i < max; i++) {
             JsonNode p = list.get(i);
@@ -447,26 +511,26 @@ public class WebhookController {
             
             OfferService.DiscountResult discount = offerService.applyBestOffer(p);
 
-            sb.append("*").append(name).append("*\n")
+            sb.append((i + 1)).append(". *").append(name).append("*\n")
               .append("   ").append(discount.toWhatsAppLine()).append("\n")
-              .append("   ðŸ“¦ ").append(inSt ? "âœ… In Stock" : "âŒ Out of Stock").append("\n\n");
+              .append("   Stock: ").append(inSt ? "In Stock" : "Out of Stock").append("\n\n");
 
-            prods.add(Map.of("id", id, "name", name));
+            prods.add(Map.of("index", String.valueOf(i + 1), "id", id, "name", name));
         }
-        sb.append("_Type the product name to view details._\n_Type *back* for main menu._");
+        sb.append("9. Previous Menu\n0. Main Menu\n\n_Please reply with a number to view product details._");
 
         try { getUserData(phone).put("productsJson", objectMapper.writeValueAsString(prods)); } catch (Exception ignored) {}
         userState.put(phone, STATE_PRODUCTS);
         return sb.toString();
     }
 
-    // â”€â”€â”€ Handle product selection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Handle product selection ---------------------------------------------
     private String handleProductSelection(String phone, String text) {
         List<Map<String, String>> prods = getListFromState(phone, "productsJson");
-        if (prods == null) return "Session expired. Type *hi* to start over.";
+        if (prods == null) return "Session expired. Type 0 to start over.";
 
-        Map<String, String> prod = matchByName(prods, text);
-        if (prod == null) return "I couldn't find that product. Try typing a name from the list above, or type *back*.";
+        Map<String, String> prod = matchByIndex(prods, text);
+        if (prod == null) return "Please reply with a valid number from the list above.";
 
         JsonNode details = bgsGet("/product/items/" + prod.get("id"));
         if (details == null) return "Could not fetch product details. Please try again.";
@@ -483,18 +547,20 @@ public class WebhookController {
         getUserData(phone).put("selectedPrice", discount.finalPrice);
         userState.put(phone, STATE_PRODUCT_DETAILS);
 
-        String stockLine = inSt ? "âœ… In Stock" : "âŒ Out of Stock";
-        String buyPrompt = inSt ? "Type *buy* to order ðŸ›’" : "âš ï¸ _This product is currently out of stock. Browse other products by typing *back*._";
+        String stockLine = inSt ? "In Stock" : "Out of Stock";
+        String buyPrompt = inSt ? "1. Buy Now\n" : "_This product is currently out of stock._\n";
 
         return "*" + name + "*\n\n"
                 + discount.toWhatsAppLine() + "\n"
-                + "ðŸ“¦ Stock : " + stockLine + "\n\n"
-                + "ðŸ“ " + desc + "\n\n"
-                + buyPrompt + "\n"
-                + "Type *back* to return.";
+                + "Stock: " + stockLine + "\n\n"
+                + desc + "\n\n"
+                + buyPrompt
+                + "9. Previous Menu\n"
+                + "0. Main Menu\n\n"
+                + "_Please reply with a number._";
     }
 
-    // â”€â”€â”€ Build order summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Build order summary --------------------------------------------------
     private String buildOrderSummary(String phone) {
         Map<String, Object> d = getUserData(phone);
         String name = (String) d.getOrDefault("orderName", "N/A");
@@ -504,28 +570,31 @@ public class WebhookController {
         String product = (String) d.getOrDefault("selectedName", "N/A");
         String price = (String) d.getOrDefault("selectedPrice", "N/A");
 
-        return "ðŸ“‹ *Order Summary*\n\n"
-                + "ðŸ›ï¸  Product : " + product + "\n"
-                + "ðŸ‘¤  Name    : " + name + "\n"
-                + "ðŸ“  Address : " + address + ", " + pincode + "\n"
-                + "ðŸ’³  Payment : " + payment + "\n"
-                + "ðŸ’°  Total   : â‚¹" + price + "\n\n"
-                + "Type *confirm* to place your order or *back* to cancel.";
+        return "*Order Summary*\n\n"
+                + "Product: " + product + "\n"
+                + "Name: " + name + "\n"
+                + "Address: " + address + ", " + pincode + "\n"
+                + "Payment: " + payment + "\n"
+                + "Total: ₹" + price + "\n\n"
+                + "1. Confirm Order\n"
+                + "9. Previous Step\n"
+                + "0. Cancel & Main Menu\n\n"
+                + "_Please reply with 1, 9, or 0._";
     }
 
-    // â”€â”€â”€ Build welcome/menu message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Build welcome/menu message -------------------------------------------
     private String buildMenuMessage(String phone) {
         String prefix = !verifiedUsers.contains(phone)
-                ? "ðŸŽ *New User Offer!* Register now to get deals!\n\n" : "";
-        return prefix + "Welcome to *YotMart*! ðŸ›ï¸\n\nWhat would you like to do?\n\n"
-                + "ðŸ›’  *Browse* â€” View product categories\n"
-                + "ðŸŽ‰  *Offers* â€” View active deals & coupons\n\n"
-                + "_You can type things like: *browse*, *offers*, *show bags*_";
+                ? "*New User Offer!* Register now to get deals!\n\n" : "";
+        return prefix + "Welcome to *YotMart*!\n\nWhat would you like to do?\n\n"
+                + "1. Browse Products\n"
+                + "2. View Offers\n\n"
+                + "_Please reply with 1 or 2._";
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     // AiSensy REPLY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     private void sendAiSensyReply(String phone, String text) {
         try {
             String url = "https://apis.aisensy.com/project-apis/v1/project/" + aisensyProjectId + "/messages";
@@ -545,9 +614,9 @@ public class WebhookController {
         }
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
     // UTILITY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ==========================================================================
 
     private Map<String, Object> getUserData(String phone) {
         return userData.computeIfAbsent(phone, k -> new ConcurrentHashMap<>());
@@ -555,13 +624,15 @@ public class WebhookController {
     
     private boolean isProductInStock(JsonNode p) {
         if (p == null) return false;
-        return p.path("stock").asInt(0) > 0 || p.path("inStock").asBoolean(false) || p.path("quantity").asInt(0) > 0;
+        // TotalStock from BGS API is the source of truth
+        return p.path("totalStock").asInt(0) > 0 || p.path("stock").asInt(0) > 0 || p.path("inStock").asBoolean(false) || p.path("quantity").asInt(0) > 0;
     }
 
     private JsonNode resolveList(JsonNode node) {
         if (node == null) return null;
         if (node.isArray()) return node;
-        for (String key : new String[] { "data", "items", "categories", "offers", "products" }) {
+        // Check for paginated content array specifically
+        for (String key : new String[] { "content", "data", "items", "categories", "offers", "products" }) {
             if (node.has(key) && node.get(key).isArray()) return node.get(key);
         }
         return null;
@@ -577,43 +648,21 @@ public class WebhookController {
         } catch (Exception e) { return null; }
     }
 
-    private Map<String, String> matchByName(List<Map<String, String>> items, String input) {
+    private Map<String, String> matchByIndex(List<Map<String, String>> items, String input) {
         if (items == null || input == null) return null;
-        String lower = input.toLowerCase().trim();
-        for (Map<String, String> item : items) { if (item.get("name").toLowerCase().equals(lower)) return item; }
-        for (Map<String, String> item : items) { if (item.get("name").toLowerCase().contains(lower)) return item; }
-        for (Map<String, String> item : items) { if (lower.contains(item.get("name").toLowerCase())) return item; }
+        for (Map<String, String> item : items) {
+            if (input.equals(item.get("index"))) return item;
+        }
         return null;
-    }
-
-    private Intent detectIntent(String input) {
-        if (input == null) return Intent.UNKNOWN;
-        if (List.of("hi", "hello", "hey", "start", "menu", "back", "home", "reset").contains(input)) return Intent.NAVIGATION;
-        if (input.contains("offer") || input.contains("discount") || input.contains("coupon") || input.contains("deal")) return Intent.OFFERS;
-        if (input.contains("buy") || input.contains("order") || input.contains("checkout")) return Intent.BUY;
-        if (input.contains("browse") || input.contains("categor") || input.contains("shop") || input.contains("show") || input.contains("view")) return Intent.BROWSE;
-        return Intent.UNKNOWN;
     }
 
     private String resolvePaymentMethod(String input) {
-        if (input.contains("cod") || input.contains("cash")) return "COD";
-        if (input.contains("upi")) return "UPI";
-        if (input.contains("online") || input.contains("card") || input.contains("net")) return "Online/Card";
+        if (input.equals("1")) return "COD";
+        if (input.equals("2")) return "UPI";
+        if (input.equals("3")) return "Online/Card";
         return null;
-    }
-
-    private String smartFallback(String state) {
-        switch (state) {
-            case STATE_MENU: return "Try typing:\nâ–¸ *browse* â€” to see products\nâ–¸ *offers* â€” to view deals";
-            case STATE_CATEGORIES: return "Please type the *name* of a category from the list above, or *back*.";
-            case STATE_SUBCATEGORIES: return "Please type the *name* of a sub-category from the list above, or *back*.";
-            case STATE_PRODUCTS: return "Please type the *product name* from the list above, or *back*.";
-            case STATE_PRODUCT_DETAILS: return "You can type *buy* to place an order, or *back* to browse.";
-            default: return "I'm not sure what you mean. ðŸ¤”\nType *hi* or *menu* to start fresh.";
-        }
     }
 
     private ResponseEntity<Map<String, String>> ok(String status) { return ResponseEntity.ok(Map.of("status", status)); }
     private ResponseEntity<Map<String, String>> badRequest(String msg) { return ResponseEntity.badRequest().body(Map.of("status", "error", "message", msg)); }
 }
-
