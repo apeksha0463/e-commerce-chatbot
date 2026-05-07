@@ -508,12 +508,15 @@ public class WebhookController {
             String name = p.path("name").asText("Product " + (i + 1));
             String id = p.path("_id").asText(p.path("id").asText(""));
             boolean inSt = isProductInStock(p);
+            int stockAmt = p.path("totalStock").asInt(p.path("stock").asInt(p.path("quantity").asInt(0)));
             
             OfferService.DiscountResult discount = offerService.applyBestOffer(p);
 
+            String stockLine = inSt ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock") : "Out of Stock";
+
             sb.append((i + 1)).append(". *").append(name).append("*\n")
               .append("   ").append(discount.toWhatsAppLine()).append("\n")
-              .append("   Stock: ").append(inSt ? "In Stock" : "Out of Stock").append("\n\n");
+              .append("   Stock: ").append(stockLine).append("\n\n");
 
             prods.add(Map.of("index", String.valueOf(i + 1), "id", id, "name", name));
         }
@@ -537,6 +540,7 @@ public class WebhookController {
 
         String name = details.path("name").asText(prod.get("name"));
         boolean inSt = isProductInStock(details);
+        int stockAmt = details.path("totalStock").asInt(details.path("stock").asInt(details.path("quantity").asInt(0)));
         OfferService.DiscountResult discount = offerService.applyBestOffer(details);
         
         String desc = details.path("description").asText("").replaceAll("<[^>]*>", "");
@@ -547,7 +551,7 @@ public class WebhookController {
         getUserData(phone).put("selectedPrice", discount.finalPrice);
         userState.put(phone, STATE_PRODUCT_DETAILS);
 
-        String stockLine = inSt ? "In Stock" : "Out of Stock";
+        String stockLine = inSt ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock") : "Out of Stock";
         String buyPrompt = inSt ? "1. Buy Now\n" : "_This product is currently out of stock._\n";
 
         return "*" + name + "*\n\n"
