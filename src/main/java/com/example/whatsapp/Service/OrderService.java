@@ -1,20 +1,16 @@
 package com.example.whatsapp.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import com.example.whatsapp.model.Order;
+import com.example.whatsapp.repository.OrderRepository;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Random;
 import java.util.logging.Logger;
 
 /**
- * Handles order creation against the BGS backend API.
- * Guarantees: order is persisted BEFORE any confirmation is sent.
+ * Handles order creation.
+ * Saves orders directly to MongoDB Atlas — no dependency on BGS backend token.
  */
 @Service
 public class OrderService {
@@ -22,20 +18,14 @@ public class OrderService {
     private static final Logger log = Logger.getLogger(OrderService.class.getName());
 
     @Autowired
-    private RestTemplate restTemplate;
-
-    @Value("${bgs.base-url:https://be.bgsinfotech.com}")
-    private String bgsBaseUrl;
-
-    @Value("${bgs.tenant-id:697c756692a4f15176fefe8e}")
-    private String bgsTenantId;
+    private OrderRepository orderRepository;
 
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Creates an order in the BGS backend.
+     * Creates and persists an order into MongoDB Atlas.
      *
-     * @param phone         customer phone (WhatsApp number)
+     * @param phone         customer WhatsApp number
      * @param productId     selected product _id
      * @param productName   selected product name
      * @param price         final (discounted) price as a string
@@ -43,7 +33,7 @@ public class OrderService {
      * @param address       delivery address
      * @param pincode       delivery pincode
      * @param paymentMethod COD | UPI | Online/Card
-     * @return OrderResult with success flag, orderId, and optional error message
+     * @return OrderResult with success flag and orderId
      */
     public OrderResult createOrder(String phone,
                                    String productId,
@@ -54,68 +44,29 @@ public class OrderService {
                                    String pincode,
                                    String paymentMethod) {
         try {
-            String url = bgsBaseUrl + "/orders";
+            // Generate a unique YotMart order ID
+            String orderId = "YOT-" + (100000 + new Random().nextInt(900000));
 
-            Map<String, Object> body = new HashMap<>();
-            body.put("phone", phone);
-            body.put("productId", productId);
-            body.put("productName", productName);
-            body.put("price", price);
-            body.put("customerName", customerName);
-            body.put("address", address + ", " + pincode);
-            body.put("pincode", pincode);
-            body.put("paymentMethod", paymentMethod);
-            body.put("source", "WHATSAPP");
+            Order order = new Order(
+                    orderId, phone, customerName,
+                    productId, productName, price,
+                    address, pincode, paymentMethod
+            );
 
-            HttpHeaders headers = buildHeaders();
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+            orderRepository.save(order);
 
-            ResponseEntity<JsonNode> resp = restTemplate.postForEntity(url, entity, JsonNode.class);
+            log.info("[OrderService] Order saved to MongoDB Atlas: " + orderId
+                    + " | Phone: " + phone
+                    + " | Product: " + productName
+                    + " | Amount: ₹" + price
+                    + " | Payment: " + paymentMethod);
 
-            log.info("[OrderService] POST /orders → " + resp.getStatusCode());
-
-            if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
-                JsonNode json = resp.getBody();
-                // Resolve orderId from several possible field names
-                String orderId = resolveOrderId(json);
-                return OrderResult.success(orderId);
-            } else {
-                log.warning("[OrderService] Non-2xx response: " + resp.getStatusCode());
-                return OrderResult.failure("Order API returned status " + resp.getStatusCode());
-            }
+            return OrderResult.success(orderId);
 
         } catch (Exception e) {
-            log.severe("[OrderService] ❌ Order creation failed: " + e.getMessage());
+            log.severe("[OrderService] Failed to save order: " + e.getMessage());
             return OrderResult.failure(e.getMessage());
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private String resolveOrderId(JsonNode json) {
-        for (String key : new String[]{"orderId", "order_id", "_id", "id"}) {
-            if (json.has(key) && !json.path(key).asText("").isEmpty()) {
-                return json.path(key).asText();
-            }
-        }
-        // Nested under data
-        JsonNode data = json.path("data");
-        if (!data.isMissingNode()) {
-            for (String key : new String[]{"orderId", "order_id", "_id", "id"}) {
-                if (data.has(key) && !data.path(key).asText("").isEmpty()) {
-                    return data.path(key).asText();
-                }
-            }
-        }
-        // Fallback: generate a local reference so the flow isn't broken
-        return "YOT-" + (100000 + new Random().nextInt(900000));
-    }
-
-    private HttpHeaders buildHeaders() {
-        HttpHeaders h = new HttpHeaders();
-        h.setContentType(MediaType.APPLICATION_JSON);
-        h.set("X-Tenant-ID", bgsTenantId);
-        return h;
     }
 
     // ── Result wrapper ────────────────────────────────────────────────────────
