@@ -99,43 +99,86 @@ public class PaymentService {
                                            String amount,
                                            String method) {
         try {
-            String url = bgsBaseUrl + "/payment/generate-link";
+            String mappedMethod = "UPI";
+            if ("Online/Card".equalsIgnoreCase(method)) {
+                mappedMethod = "ONLINE";
+            } else if ("UPI".equalsIgnoreCase(method)) {
+                mappedMethod = "UPI";
+            }
 
-            Map<String, Object> body = new HashMap<>();
-            body.put("orderId", orderId);
-            body.put("phone", phone);
-            body.put("amount", amount);
-            body.put("method", method);   // UPI | Online/Card
+            String url = bgsBaseUrl + "/orders/orders/initiate-payment/" + orderId + "?method=" + mappedMethod;
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("X-Tenant-ID", bgsTenantId);
 
-            ResponseEntity<JsonNode> resp = restTemplate.postForEntity(
-                    url, new HttpEntity<>(body, headers), JsonNode.class);
+            log.info("[PaymentService] Initiating BGS payment PUT request: " + url);
+            ResponseEntity<JsonNode> resp = restTemplate.exchange(
+                    url, HttpMethod.PUT, new HttpEntity<>(headers), JsonNode.class);
 
+            String sessionId = null;
             if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
                 JsonNode json = resp.getBody();
-                // Try common field names
-                for (String key : new String[]{"paymentLink", "payment_link", "link", "url", "checkoutUrl"}) {
-                    if (json.has(key) && !json.path(key).asText("").isEmpty()) {
-                        return json.path(key).asText();
+                JsonNode cfResp = json.path("cashFreeResponse");
+                if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
+                    sessionId = cfResp.path("payment_session_id").asText();
+                    if (sessionId != null && sessionId.equals("null")) {
+                        sessionId = null;
                     }
                 }
-                // Nested under data
-                JsonNode data = json.path("data");
-                if (!data.isMissingNode()) {
-                    for (String key : new String[]{"paymentLink", "payment_link", "link", "url", "checkoutUrl"}) {
-                        if (data.has(key) && !data.path(key).asText("").isEmpty()) {
-                            return data.path(key).asText();
-                        }
-                    }
-                }
+            }
+
+            if (sessionId == null || sessionId.isBlank()) {
+                log.info("[PaymentService] Session ID not returned immediately, starting polling...");
+                sessionId = pollForSessionId(orderId, headers);
+            }
+
+            if (sessionId != null && !sessionId.isBlank()) {
+                return getCashfreeCheckoutUrl(sessionId);
             }
         } catch (Exception e) {
             log.warning("[PaymentService] BGS payment endpoint error: " + e.getMessage());
         }
         return null;
+    }
+
+    private String pollForSessionId(String trackingId, HttpHeaders headers) {
+        String url = bgsBaseUrl + "/payments/api/payments/cashfree/payment/" + trackingId;
+        for (int i = 1; i <= 6; i++) {
+            try {
+                log.info("[PaymentService] Polling payment session (attempt " + i + "/6) for: " + trackingId);
+                ResponseEntity<JsonNode> resp = restTemplate.exchange(
+                        url, HttpMethod.GET, new HttpEntity<>(headers), JsonNode.class);
+
+                if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
+                    JsonNode json = resp.getBody();
+                    JsonNode cfResp = json.path("cashFreeResponse");
+                    if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
+                        String sessionId = cfResp.path("payment_session_id").asText();
+                        if (sessionId != null && !sessionId.isBlank() && !sessionId.equals("null")) {
+                            log.info("[PaymentService] Found payment session ID: " + sessionId);
+                            return sessionId;
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warning("[PaymentService] Error during session polling: " + e.getMessage());
+            }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return null;
+    }
+
+    private String getCashfreeCheckoutUrl(String sessionId) {
+        if (bgsBaseUrl.contains("bgsinfotech.com") || bgsBaseUrl.contains("sandbox") || bgsBaseUrl.contains("staging")) {
+            return "https://sandbox.cashfree.com/order/#" + sessionId;
+        }
+        return "https://payments.cashfree.com/order/#" + sessionId;
     }
 
     // ── Direct gateway (Razorpay-style) ──────────────────────────────────────
