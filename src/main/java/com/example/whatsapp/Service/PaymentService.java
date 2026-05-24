@@ -61,7 +61,7 @@ public class PaymentService {
             try {
                 attempts++;
                 log.info("[PaymentService] Attempt " + attempts
-                        + " – generating link for order " + orderId);
+                        + " – generating link for order" + orderId);
 
                 // ── Try BGS backend payment endpoint first ─────────────────
                 String link = callBgsPaymentEndpoint(orderId, phone, amount, paymentMethod);
