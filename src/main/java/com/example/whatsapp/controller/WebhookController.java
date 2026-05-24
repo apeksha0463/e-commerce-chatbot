@@ -403,7 +403,7 @@ public class WebhookController {
                 + "Thank you for shopping with *YotMart*!";
 
         // 3. Generate Payment Link if not COD
-        if (!"COD".equals(payment)) {
+        if (!"CASH_ON_DELIVERY".equals(payment)) {
             PaymentService.PaymentResult payRes = paymentService.generatePaymentLink(
                     orderId, phone, finalPrice, payment);
             
@@ -699,7 +699,7 @@ public class WebhookController {
     }
 
     private String resolvePaymentMethod(String input) {
-        if (input.equals("1")) return "COD";
+        if (input.equals("1")) return "CASH_ON_DELIVERY";
         if (input.equals("2")) return "UPI";
         if (input.equals("3")) return "Online/Card";
         return null;
