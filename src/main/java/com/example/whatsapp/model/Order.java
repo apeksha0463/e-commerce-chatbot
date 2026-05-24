@@ -1,17 +1,13 @@
 package com.example.whatsapp.model;
 
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
 import java.time.LocalDateTime;
 
 /**
- * Represents a WhatsApp chatbot order stored in MongoDB Atlas.
- * Collection name: "whatsapp_orders"
+ * Represents a WhatsApp chatbot order.
  */
-@Document(collection = "whatsapp_orders")
 public class Order {
 
-    @Id
+
     private String id;
 
     private String orderId;          // e.g. YOT-145920
