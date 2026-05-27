@@ -33,6 +33,8 @@ public class WebhookController {
     @Autowired
     private OfferService offerService;
 
+
+
     @Autowired
     private ValidationService validationService;
 
@@ -58,9 +60,9 @@ public class WebhookController {
     private static final String STATE_SUBCATEGORIES = "SUBCATEGORIES";
     private static final String STATE_PRODUCTS = "PRODUCTS";
     private static final String STATE_PRODUCT_DETAILS = "PRODUCT_DETAILS";
-    
+
     // User Verification
-    private static final String STATE_OTP_VERIFY = "OTP_VERIFY";
+
 
     // Order Flow
     private static final String STATE_ORDER_NAME = "ORDER_NAME";
@@ -74,7 +76,6 @@ public class WebhookController {
     private static final Map<String, Long> lastInteractionTime = new ConcurrentHashMap<>();
     private static final Map<String, String> userState = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> userData = new ConcurrentHashMap<>();
-    private static final Set<String> verifiedUsers = ConcurrentHashMap.newKeySet();
 
     private String getOrCreateToken(String phone) {
         return phoneTokenMap.computeIfAbsent(phone, k -> UUID.randomUUID().toString());
@@ -98,10 +99,10 @@ public class WebhookController {
                     sendAiSensyReply(phone, "⏳ Your session has timed out due to inactivity. Type *hi* to start over.");
                     phoneTokenMap.remove(phone);
                 }
-                
+
                 userState.remove(token);
                 userData.remove(token);
-                verifiedUsers.remove(token);
+
                 lastInteractionTime.remove(token);
             }
         }
@@ -117,7 +118,7 @@ public class WebhookController {
     @PostMapping("/messages/whatsapp")
     public ResponseEntity<Map<String, String>> receiveMessage(@RequestBody JsonNode body) {
         log.info("=== Webhook HIT ===");
-        
+
         try {
             JsonNode msgNode = body.path("data").path("message");
 
@@ -133,8 +134,10 @@ public class WebhookController {
             String buttonPayload = msgNode.path("message_content").path("button_payload").asText("").trim();
             String text = buttonPayload.isEmpty() ? rawText : buttonPayload;
 
-            if (phone.isEmpty()) return badRequest("Phone number missing");
-            if (text.isEmpty()) return ok("no text content");
+            if (phone.isEmpty())
+                return badRequest("Phone number missing");
+            if (text.isEmpty())
+                return ok("no text content");
 
             String token = getOrCreateToken(phone);
             lastInteractionTime.put(token, System.currentTimeMillis());
@@ -158,11 +161,8 @@ public class WebhookController {
                         if (input.equals("1")) {
                             reply = fetchCategories(token);
                             next = reply.contains("unavailable") ? STATE_MENU : STATE_CATEGORIES;
-                        } else if (input.equals("2")) {
-                            reply = offerService.fetchActiveOffersMessage();
-                            next = STATE_MENU;
                         } else {
-                            reply = "Please reply with a valid number (1 or 2).";
+                            reply = "Please reply with a valid number (1).";
                         }
                         break;
                     }
@@ -224,44 +224,16 @@ public class WebhookController {
                             String prodId = (String) getUserData(token).get("selectedId");
                             JsonNode details = bgsGet("/product/items/" + prodId);
                             boolean inStock = isProductInStock(details);
-                            
+
                             if (!inStock) {
                                 reply = "Sorry, this product is currently *out of stock*.\n\n"
                                         + "Type 9 for Previous Menu or 0 for Main Menu.";
                             } else {
-                                if (!verifiedUsers.contains(token)) {
-                                    String otp = String.format("%04d", new Random().nextInt(10000));
-                                    getUserData(token).put("otp", otp);
-                                    reply = "*Verification Required*\n\n"
-                                          + "We have sent a 4-digit OTP to your number. For testing, your OTP is: *" + otp + "*\n\n"
-                                          + "Please enter the OTP to continue your order:";
-                                    next = STATE_OTP_VERIFY;
-                                } else {
-                                    reply = "Great! Let's place your order.\n\nPlease enter your *Full Name*:";
-                                    next = STATE_ORDER_NAME;
-                                }
+                                reply = "Great! Let's place your order.\n\nPlease enter your *Full Name*:";
+                                next = STATE_ORDER_NAME;
                             }
                         } else {
                             reply = "Please type 1 to Buy, 9 for Previous Menu, or 0 for Main Menu.";
-                        }
-                        break;
-                    }
-
-                    case STATE_OTP_VERIFY: {
-                        if (input.equals("9")) {
-                            String lastSlug = (String) getUserData(token).get("lastSlug");
-                            String lastName = (String) getUserData(token).get("lastCategoryName");
-                            reply = fetchProducts(token, lastSlug, lastName);
-                            next = STATE_PRODUCTS;
-                        } else {
-                            String savedOtp = (String) getUserData(token).get("otp");
-                            if (input.equals(savedOtp)) {
-                                verifiedUsers.add(token);
-                                reply = "Number verified successfully!\n\nPlease enter your *Full Name* for the order:";
-                                next = STATE_ORDER_NAME;
-                            } else {
-                                reply = "Incorrect OTP. Please try again or type 9 to cancel and go back.";
-                            }
                         }
                         break;
                     }
@@ -371,7 +343,7 @@ public class WebhookController {
     // ==========================================================================
     // ORDER PLACEMENT LOGIC
     // ==========================================================================
-    
+
     private String processFinalOrder(String phone, String token) {
         Map<String, Object> d = getUserData(token);
         String prodId = (String) d.get("selectedId");
@@ -382,7 +354,7 @@ public class WebhookController {
         String pincode = (String) d.get("orderPincode");
         String payment = (String) d.get("paymentMethod");
 
-        // 1. Re-validate Stock (CRITICAL)
+        // 1. Re‑validate Stock (CRITICAL)
         JsonNode details = bgsGet("/product/items/" + prodId);
         if (!isProductInStock(details)) {
             return "We're sorry, but this product just went *out of stock*.\nYour order could not be placed. Type 0 for Main Menu to view other products.";
@@ -398,28 +370,31 @@ public class WebhookController {
         }
 
         String orderId = orderRes.orderId;
-        String msg = "*Order Placed Successfully!*\n\n"
-                + "Order ID : #" + orderId + "\n"
-                + "Thank you for shopping with *YotMart*!";
+        StringBuilder msg = new StringBuilder();
+        msg.append("*Order Placed Successfully!*\n\n")
+                .append("Order ID : #").append(orderId).append("\n")
+                .append("Thank you for shopping with *YotMart*!\n");
 
         // 3. Generate Payment Link if not COD
-        if (!"CASH_ON_DELIVERY".equals(payment)) {
+        if (!"COD".equals(payment)) {
             PaymentService.PaymentResult payRes = paymentService.generatePaymentLink(
                     orderId, phone, finalPrice, payment);
-            
+
             if (payRes.success) {
-                msg += "\n\n*Please complete your payment here:*\n" + payRes.paymentLink;
+                msg.append("\n\n*Please complete your payment here:*\n").append(payRes.paymentLink);
             } else {
-                return "Order created, but *Payment link could not be generated*. Try again or choose another method.\n\n"
-                     + "1. COD (Cash on Delivery)\n"
-                     + "2. UPI Payment\n"
-                     + "3. Online (Card / Net Banking)\n\n"
-                     + "_Please reply with 1, 2, or 3._";
+                // Payment link generation failed – keep user in payment step to re‑choose
+                log.warning("Payment link generation failed for order " + orderId + ": " + payRes.errorMessage);
+                // Reset state so the user can pick another method
+                userState.put(token, STATE_ORDER_PAYMENT);
+                return "Order created, but *Payment link could not be generated*: " + payRes.errorMessage
+                        + "\n\nPlease reply with:\n1. COD (Cash on Delivery)\n2. UPI Payment\n3. Online (Card / Net Banking)\n\n_Enter 1, 2, or 3._";
             }
         }
 
+        // Cleanup session data
         userData.remove(token);
-        return msg;
+        return msg.toString();
     }
 
     // ==========================================================================
@@ -446,9 +421,16 @@ public class WebhookController {
     }
 
     // --- Fetch & format categories ------------------------------------------
+    private void clearUserData(String token) {
+        userData.remove(token);
+        userState.remove(token);
+    }
+
+    // --- Fetch & format categories ------------------------------------------
     private String fetchCategories(String token) {
         JsonNode data = bgsGet("/product/categories");
-        if (data == null) return "Service temporarily unavailable. Please try again later.";
+        if (data == null)
+            return "Service temporarily unavailable. Please try again later.";
 
         JsonNode list = resolveList(data);
         if (list == null || !list.isArray() || list.size() == 0) {
@@ -469,7 +451,10 @@ public class WebhookController {
         }
         sb.append("\n9. Previous Menu\n0. Main Menu\n\n_Please reply with a number._");
 
-        try { getUserData(token).put("categoriesJson", objectMapper.writeValueAsString(cats)); } catch (Exception ignored) {}
+        try {
+            getUserData(token).put("categoriesJson", objectMapper.writeValueAsString(cats));
+        } catch (Exception ignored) {
+        }
         userState.put(token, STATE_CATEGORIES);
         return sb.toString();
     }
@@ -477,10 +462,12 @@ public class WebhookController {
     // --- Handle category selection -----------------------------------------
     private String handleCategorySelection(String token, String text) {
         List<Map<String, String>> cats = getListFromState(token, "categoriesJson");
-        if (cats == null) return "Session expired. Type 0 to start over.";
+        if (cats == null)
+            return "Session expired. Type 0 to start over.";
 
         Map<String, String> cat = matchByIndex(cats, text);
-        if (cat == null) return "Please reply with a valid number from the list above.";
+        if (cat == null)
+            return "Please reply with a valid number from the list above.";
 
         getUserData(token).put("lastCategoryId", cat.get("id"));
 
@@ -509,7 +496,10 @@ public class WebhookController {
         }
         sb.append("\n9. Previous Menu\n0. Main Menu\n\n_Please reply with a number._");
 
-        try { getUserData(token).put("subCatsJson", objectMapper.writeValueAsString(subs)); } catch (Exception ignored) {}
+        try {
+            getUserData(token).put("subCatsJson", objectMapper.writeValueAsString(subs));
+        } catch (Exception ignored) {
+        }
         userState.put(token, STATE_SUBCATEGORIES);
         return sb.toString();
     }
@@ -517,10 +507,12 @@ public class WebhookController {
     // --- Handle sub-category selection ---------------------------------------
     private String handleSubCategorySelection(String token, String text) {
         List<Map<String, String>> subs = getListFromState(token, "subCatsJson");
-        if (subs == null) return "Session expired. Type 0 to start over.";
+        if (subs == null)
+            return "Session expired. Type 0 to start over.";
 
         Map<String, String> sub = matchByIndex(subs, text);
-        if (sub == null) return "Please reply with a valid number from the list above.";
+        if (sub == null)
+            return "Please reply with a valid number from the list above.";
 
         return fetchProducts(token, sub.get("slug"), sub.get("name"));
     }
@@ -547,20 +539,25 @@ public class WebhookController {
             String id = p.path("_id").asText(p.path("id").asText(""));
             boolean inSt = isProductInStock(p);
             int stockAmt = p.path("totalStock").asInt(p.path("stock").asInt(p.path("quantity").asInt(0)));
-            
+
             OfferService.DiscountResult discount = offerService.applyBestOffer(p);
 
-            String stockLine = inSt ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock") : "Out of Stock";
+            String stockLine = inSt
+                    ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock")
+                    : "Out of Stock";
 
             sb.append((i + 1)).append(". *").append(name).append("*\n")
-              .append("   ").append(discount.toWhatsAppLine()).append("\n")
-              .append("   Stock: ").append(stockLine).append("\n\n");
+                    .append("   ").append(discount.toWhatsAppLine()).append("\n")
+                    .append("   Stock: ").append(stockLine).append("\n\n");
 
             prods.add(Map.of("index", String.valueOf(i + 1), "id", id, "name", name));
         }
         sb.append("9. Previous Menu\n0. Main Menu\n\n_Please reply with a number to view product details._");
 
-        try { getUserData(token).put("productsJson", objectMapper.writeValueAsString(prods)); } catch (Exception ignored) {}
+        try {
+            getUserData(token).put("productsJson", objectMapper.writeValueAsString(prods));
+        } catch (Exception ignored) {
+        }
         userState.put(token, STATE_PRODUCTS);
         return sb.toString();
     }
@@ -568,28 +565,34 @@ public class WebhookController {
     // --- Handle product selection ---------------------------------------------
     private String handleProductSelection(String token, String text) {
         List<Map<String, String>> prods = getListFromState(token, "productsJson");
-        if (prods == null) return "Session expired. Type 0 to start over.";
+        if (prods == null)
+            return "Session expired. Type 0 to start over.";
 
         Map<String, String> prod = matchByIndex(prods, text);
-        if (prod == null) return "Please reply with a valid number from the list above.";
+        if (prod == null)
+            return "Please reply with a valid number from the list above.";
 
         JsonNode details = bgsGet("/product/items/" + prod.get("id"));
-        if (details == null) return "Could not fetch product details. Please try again.";
+        if (details == null)
+            return "Could not fetch product details. Please try again.";
 
         String name = details.path("name").asText(prod.get("name"));
         boolean inSt = isProductInStock(details);
         int stockAmt = details.path("totalStock").asInt(details.path("stock").asInt(details.path("quantity").asInt(0)));
         OfferService.DiscountResult discount = offerService.applyBestOffer(details);
-        
+
         String desc = details.path("description").asText("").replaceAll("<[^>]*>", "");
-        if (desc.length() > 250) desc = desc.substring(0, 250) + "...";
+        if (desc.length() > 250)
+            desc = desc.substring(0, 250) + "...";
 
         getUserData(token).put("selectedId", prod.get("id"));
         getUserData(token).put("selectedName", name);
         getUserData(token).put("selectedPrice", discount.finalPrice);
         userState.put(token, STATE_PRODUCT_DETAILS);
 
-        String stockLine = inSt ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock") : "Out of Stock";
+        String stockLine = inSt
+                ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock")
+                : "Out of Stock";
         String buyPrompt = inSt ? "1. Buy Now\n" : "_This product is currently out of stock._\n";
 
         return "*" + name + "*\n\n"
@@ -626,12 +629,9 @@ public class WebhookController {
 
     // --- Build welcome/menu message -------------------------------------------
     private String buildMenuMessage(String token) {
-        String prefix = !verifiedUsers.contains(token)
-                ? "*New User Offer!* Register now to get deals!\n\n" : "";
-        return prefix + "Welcome to *YotMart*!\n\nWhat would you like to do?\n\n"
-                + "1. Browse Products\n"
-                + "2. View Offers\n\n"
-                + "_Please reply with 1 or 2._";
+        return "Welcome to *YotMart*!\n\nWhat would you like to do?\n\n"
+                + "1. Browse Products\n\n"
+                + "_Please reply with 1._";
     }
 
     // ==========================================================================
@@ -663,19 +663,24 @@ public class WebhookController {
     private Map<String, Object> getUserData(String token) {
         return userData.computeIfAbsent(token, k -> new ConcurrentHashMap<>());
     }
-    
+
     private boolean isProductInStock(JsonNode p) {
-        if (p == null) return false;
+        if (p == null)
+            return false;
         // TotalStock from BGS API is the source of truth
-        return p.path("totalStock").asInt(0) > 0 || p.path("stock").asInt(0) > 0 || p.path("inStock").asBoolean(false) || p.path("quantity").asInt(0) > 0;
+        return p.path("totalStock").asInt(0) > 0 || p.path("stock").asInt(0) > 0 || p.path("inStock").asBoolean(false)
+                || p.path("quantity").asInt(0) > 0;
     }
 
     private JsonNode resolveList(JsonNode node) {
-        if (node == null) return null;
-        if (node.isArray()) return node;
+        if (node == null)
+            return null;
+        if (node.isArray())
+            return node;
         // Check for paginated content array specifically
         for (String key : new String[] { "content", "data", "items", "categories", "offers", "products" }) {
-            if (node.has(key) && node.get(key).isArray()) return node.get(key);
+            if (node.has(key) && node.get(key).isArray())
+                return node.get(key);
         }
         return null;
     }
@@ -683,28 +688,41 @@ public class WebhookController {
     @SuppressWarnings("unchecked")
     private List<Map<String, String>> getListFromState(String token, String key) {
         Object raw = getUserData(token).get(key);
-        if (raw == null) return null;
+        if (raw == null)
+            return null;
         try {
             return objectMapper.readValue(raw.toString(),
                     objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class));
-        } catch (Exception e) { return null; }
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Map<String, String> matchByIndex(List<Map<String, String>> items, String input) {
-        if (items == null || input == null) return null;
+        if (items == null || input == null)
+            return null;
         for (Map<String, String> item : items) {
-            if (input.equals(item.get("index"))) return item;
+            if (input.equals(item.get("index")))
+                return item;
         }
         return null;
     }
 
     private String resolvePaymentMethod(String input) {
-        if (input.equals("1")) return "CASH_ON_DELIVERY";
-        if (input.equals("2")) return "UPI";
-        if (input.equals("3")) return "Online/Card";
+        if (input.equals("1"))
+            return "COD";
+        if (input.equals("2"))
+            return "UPI";
+        if (input.equals("3"))
+            return "ONLINE";
         return null;
     }
 
-    private ResponseEntity<Map<String, String>> ok(String status) { return ResponseEntity.ok(Map.of("status", status)); }
-    private ResponseEntity<Map<String, String>> badRequest(String msg) { return ResponseEntity.badRequest().body(Map.of("status", "error", "message", msg)); }
+    private ResponseEntity<Map<String, String>> ok(String status) {
+        return ResponseEntity.ok(Map.of("status", status));
+    }
+
+    private ResponseEntity<Map<String, String>> badRequest(String msg) {
+        return ResponseEntity.badRequest().body(Map.of("status", "error", "message", msg));
+    }
 }
