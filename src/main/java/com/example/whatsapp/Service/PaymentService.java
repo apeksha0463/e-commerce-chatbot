@@ -34,12 +34,6 @@ public class PaymentService {
     @Value("${bgs.tenant-id:697c756692a4f15176fefe8e}")
     private String bgsTenantId;
 
-    // Payment gateway base URL and key (set in application.properties)
-    @Value("${payment.gateway-url:https://api.razorpay.com/v1}")
-    private String gatewayUrl;
-
-    @Value("${payment.api-key:}")
-    private String paymentApiKey;
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -61,7 +55,7 @@ public class PaymentService {
             try {
                 attempts++;
                 log.info("[PaymentService] Attempt " + attempts
-                        + " – generating link for order" + orderId);
+                        + " – generating link for order " + orderId);
 
                 // ── Try BGS backend payment endpoint first ─────────────────
                 String link = callBgsPaymentEndpoint(orderId, phone, amount, paymentMethod);
@@ -70,14 +64,6 @@ public class PaymentService {
                     return PaymentResult.success(link);
                 }
 
-                // ── Fallback: generate link via payment gateway directly ───
-                if (paymentApiKey != null && !paymentApiKey.isBlank()) {
-                    link = callGatewayDirectly(orderId, phone, amount);
-                    if (link != null && !link.isBlank()) {
-                        log.info("[PaymentService] ✅ Link from gateway: " + link);
-                        return PaymentResult.success(link);
-                    }
-                }
 
                 log.warning("[PaymentService] Attempt " + attempts + " yielded no link.");
 
@@ -100,7 +86,7 @@ public class PaymentService {
                                            String method) {
         try {
             String mappedMethod = "UPI";
-            if ("Online/Card".equalsIgnoreCase(method)) {
+            if ("ONLINE".equalsIgnoreCase(method)) {
                 mappedMethod = "ONLINE";
             } else if ("UPI".equalsIgnoreCase(method)) {
                 mappedMethod = "UPI";
@@ -120,6 +106,10 @@ public class PaymentService {
             if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
                 JsonNode json = resp.getBody();
                 JsonNode cfResp = json.path("cashFreeResponse");
+                if (cfResp.isMissingNode() && json.has("data")) {
+                    cfResp = json.path("data").path("cashFreeResponse");
+                }
+                
                 if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
                     sessionId = cfResp.path("payment_session_id").asText();
                     if (sessionId != null && sessionId.equals("null")) {
@@ -153,6 +143,10 @@ public class PaymentService {
                 if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
                     JsonNode json = resp.getBody();
                     JsonNode cfResp = json.path("cashFreeResponse");
+                    if (cfResp.isMissingNode() && json.has("data")) {
+                        cfResp = json.path("data").path("cashFreeResponse");
+                    }
+                    
                     if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
                         String sessionId = cfResp.path("payment_session_id").asText();
                         if (sessionId != null && !sessionId.isBlank() && !sessionId.equals("null")) {
@@ -175,53 +169,9 @@ public class PaymentService {
     }
 
     private String getCashfreeCheckoutUrl(String sessionId) {
-        if (bgsBaseUrl.contains("bgsinfotech.com") || bgsBaseUrl.contains("sandbox") || bgsBaseUrl.contains("staging")) {
-            return "https://sandbox.cashfree.com/order/#" + sessionId;
-        }
         return "https://payments.cashfree.com/order/#" + sessionId;
     }
 
-    // ── Direct gateway (Razorpay-style) ──────────────────────────────────────
-
-    private String callGatewayDirectly(String orderId, String phone, String amount) {
-        try {
-            // Convert amount to paise (Razorpay expects smallest currency unit)
-            long amountPaise = Math.round(Double.parseDouble(amount) * 100);
-
-            String url = gatewayUrl + "/payment_links";
-
-            Map<String, Object> body = new HashMap<>();
-            body.put("amount", amountPaise);
-            body.put("currency", "INR");
-            body.put("description", "Order #" + orderId);
-            body.put("reference_id", orderId);
-            Map<String, String> customer = new HashMap<>();
-            customer.put("contact", phone);
-            body.put("customer", customer);
-            body.put("notify", Map.of("sms", false, "email", false));
-            body.put("reminder_enable", false);
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            if (paymentApiKey.contains(":")) {
-                String[] parts = paymentApiKey.split(":", 2);
-                headers.setBasicAuth(parts[0], parts[1]);
-            } else {
-                headers.setBasicAuth(paymentApiKey, "");
-            }
-
-            ResponseEntity<JsonNode> resp = restTemplate.postForEntity(
-                    url, new HttpEntity<>(body, headers), JsonNode.class);
-
-            if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
-                JsonNode json = resp.getBody();
-                return json.path("short_url").asText(json.path("url").asText(""));
-            }
-        } catch (Exception e) {
-            log.warning("[PaymentService] Gateway call error: " + e.getMessage());
-        }
-        return null;
-    }
 
     // ── Result wrapper ────────────────────────────────────────────────────────
 
