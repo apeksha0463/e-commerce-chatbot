@@ -60,6 +60,20 @@ public class OrderService {
             body.put("utmSource", "whatsapp");
             body.put("utmMedium", "chat");
 
+            // Inject the collected address and user details
+            Map<String, Object> shippingAddress = new HashMap<>();
+            shippingAddress.put("name", customerName);
+            shippingAddress.put("phone", phone);
+            shippingAddress.put("addressLine1", address);
+            shippingAddress.put("zipCode", pincode);
+            shippingAddress.put("addressType", "HOME");
+            body.put("shippingAddress", shippingAddress);
+
+            // Inject payment method
+            Map<String, Object> paymentData = new HashMap<>();
+            paymentData.put("method", paymentMethod);
+            body.put("payment", paymentData);
+
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("X-Tenant-ID", bgsTenantId);
