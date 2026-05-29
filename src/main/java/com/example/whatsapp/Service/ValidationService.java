@@ -1,5 +1,7 @@
 package com.example.whatsapp.service;
 
+import com.example.whatsapp.config.AppProperties;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 /**
@@ -7,21 +9,21 @@ import org.springframework.stereotype.Service;
  * Extend isServiceable() to call a real logistics API if available.
  */
 @Service
+@RequiredArgsConstructor
 public class ValidationService {
 
-    private static final int MIN_ADDRESS_LENGTH = 10;
-    private static final int PINCODE_LENGTH     = 6;
+    private final AppProperties appProperties;
 
     // ── Address ──────────────────────────────────────────────────────────────
 
     public boolean isAddressValid(String address) {
         return address != null
-                && address.trim().length() >= MIN_ADDRESS_LENGTH;
+                && address.trim().length() >= appProperties.getValidation().getMinAddressLength();
     }
 
     public String addressErrorMessage() {
         return "Please enter a *valid delivery address* (at least "
-                + MIN_ADDRESS_LENGTH + " characters).\n"
+                + appProperties.getValidation().getMinAddressLength() + " characters).\n"
                 + "Example: _12, Main St, Mumbai, Maharashtra_";
     }
 
@@ -29,11 +31,11 @@ public class ValidationService {
 
     public boolean isPincodeValid(String pincode) {
         return pincode != null
-                && pincode.trim().matches("\\d{" + PINCODE_LENGTH + "}");
+                && pincode.trim().matches("\\d{" + appProperties.getValidation().getPincodeLength() + "}");
     }
 
     public String pincodeErrorMessage() {
-        return "Please enter a valid *6-digit pincode* (numbers only).\n"
+        return "Please enter a valid *" + appProperties.getValidation().getPincodeLength() + "-digit pincode* (numbers only).\n"
                 + "Example: _400001_";
     }
 
