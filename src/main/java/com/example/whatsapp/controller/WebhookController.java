@@ -12,17 +12,24 @@ import org.springframework.web.client.RestTemplate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
+import lombok.extern.slf4j.Slf4j;
+import com.example.whatsapp.config.AppProperties;
+import com.example.whatsapp.client.BgsApiClient;
 
 @CrossOrigin(origins = "*")
 @RestController
+@Slf4j
 public class WebhookController {
-
-    private static final Logger log = Logger.getLogger(WebhookController.class.getName());
 
     @Autowired
     private RestTemplate restTemplate;
+
+    @Autowired
+    private AppProperties appProperties;
+
+    @Autowired
+    private BgsApiClient bgsApiClient;
 
     @Autowired
     private OrderService orderService;
@@ -39,19 +46,6 @@ public class WebhookController {
     private ValidationService validationService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-
-    // --- Config from application.properties ---------------------------------
-    @Value("${bgs.base-url:https://be.bgsinfotech.com}")
-    private String bgsBaseUrl;
-
-    @Value("${bgs.tenant-id:697c756692a4f15176fefe8e}")
-    private String bgsTenantId;
-
-    @Value("${aisensy.api-key:577d0643178707e58a3b0}")
-    private String aisensyApiKey;
-
-    @Value("${aisensy.project-id:69da0b7a7dec1710f8a9db08}")
-    private String aisensyProjectId;
 
     // --- State constants ----------------------------------------------------
     private static final String STATE_START = "START";
@@ -84,7 +78,7 @@ public class WebhookController {
     @Scheduled(fixedDelay = 60000)
     public void checkIdleSessions() {
         long now = System.currentTimeMillis();
-        long timeoutMs = TimeUnit.MINUTES.toMillis(10);
+        long timeoutMs = TimeUnit.MINUTES.toMillis(appProperties.getSession().getTimeoutMinutes());
 
         for (Map.Entry<String, Long> entry : lastInteractionTime.entrySet()) {
             String token = entry.getKey();
@@ -333,8 +327,7 @@ public class WebhookController {
             return ok("ok");
 
         } catch (Exception e) {
-            log.severe("[Error] " + e.getMessage());
-            e.printStackTrace();
+            log.error("[Error] {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("status", "error", "message", e.getMessage()));
         }
@@ -365,7 +358,7 @@ public class WebhookController {
                 phone, prodId, prodName, finalPrice, name, address, pincode, payment);
 
         if (!orderRes.success) {
-            log.severe("Order creation failed for " + phone + ": " + orderRes.errorMessage);
+            log.error("Order creation failed for {}: {}", phone, orderRes.errorMessage);
             return "Oops! Something went wrong while creating your order. Please try again later or contact support.";
         }
 
@@ -384,7 +377,7 @@ public class WebhookController {
                 msg.append("\n\n*Please complete your payment here:*\n").append(payRes.paymentLink);
             } else {
                 // Payment link generation failed – keep user in payment step to re‑choose
-                log.warning("Payment link generation failed for order " + orderId + ": " + payRes.errorMessage);
+                log.warn("Payment link generation failed for order {}: {}", orderId, payRes.errorMessage);
                 // Reset state so the user can pick another method
                 userState.put(token, STATE_ORDER_PAYMENT);
                 return "Order created, but *Payment link could not be generated*: " + payRes.errorMessage
@@ -401,21 +394,10 @@ public class WebhookController {
     // BGS API HELPER METHODS
     // ==========================================================================
 
-    private HttpHeaders bgsHeaders() {
-        HttpHeaders h = new HttpHeaders();
-        h.setContentType(MediaType.APPLICATION_JSON);
-        h.set("X-Tenant-ID", bgsTenantId);
-        return h;
-    }
-
     private JsonNode bgsGet(String path) {
-        String url = bgsBaseUrl + path;
-        HttpEntity<Void> entity = new HttpEntity<>(bgsHeaders());
         try {
-            ResponseEntity<JsonNode> resp = restTemplate.exchange(url, HttpMethod.GET, entity, JsonNode.class);
-            return resp.getBody();
+            return bgsApiClient.get(path);
         } catch (Exception e) {
-            log.warning("[BGS] Error calling " + path + ": " + e.getMessage());
             return null;
         }
     }
@@ -639,7 +621,7 @@ public class WebhookController {
     // ==========================================================================
     private void sendAiSensyReply(String phone, String text) {
         try {
-            String url = "https://apis.aisensy.com/project-apis/v1/project/" + aisensyProjectId + "/messages";
+            String url = "https://apis.aisensy.com/project-apis/v1/project/" + appProperties.getAisensy().getProjectId() + "/messages";
             Map<String, Object> payload = new HashMap<>();
             payload.put("to", phone);
             payload.put("type", "text");
@@ -648,11 +630,11 @@ public class WebhookController {
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("X-AiSensy-Project-API-Pwd", aisensyApiKey);
+            headers.set("X-AiSensy-Project-API-Pwd", appProperties.getAisensy().getApiKey());
 
             restTemplate.postForEntity(url, new HttpEntity<>(payload, headers), JsonNode.class);
         } catch (Exception e) {
-            log.warning("[AiSensy] Failed to send reply: " + e.getMessage());
+            log.warn("[AiSensy] Failed to send reply: {}", e.getMessage());
         }
     }
 
