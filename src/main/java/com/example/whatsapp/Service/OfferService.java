@@ -1,31 +1,21 @@
 package com.example.whatsapp.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.example.whatsapp.client.BgsApiClient;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-
-import java.util.logging.Logger;
 
 /**
  * Fetches active offers from the BGS backend and resolves discounted prices.
  * Endpoint: GET /offers?status=ACTIVE  (or /offers/offers/type/PROMOTIONAL)
  */
 @Service
+@Slf4j
 public class OfferService {
 
-    private static final Logger log = Logger.getLogger(OfferService.class.getName());
-
     @Autowired
-    private RestTemplate restTemplate;
-
-    @Value("${bgs.base-url:https://be.bgsinfotech.com}")
-    private String bgsBaseUrl;
-
-    @Value("${bgs.tenant-id:697c756692a4f15176fefe8e}")
-    private String bgsTenantId;
+    private BgsApiClient bgsApiClient;
 
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -93,12 +83,20 @@ public class OfferService {
             return DiscountResult.noDiscount("0");
         }
 
-        // Prefer discountedPrice / salePrice from product itself
-        String originalStr  = productDetails.path("price")
-                .asText(productDetails.path("mrp").asText("0"));
+        // Prefer Vara-style pricing object first
+        JsonNode pricing = productDetails.path("pricing");
+        String originalStr = productDetails.path("price").asText(productDetails.path("mrp").asText("0"));
         String discountedStr = productDetails.path("discountedPrice")
-                .asText(productDetails.path("salePrice")
-                        .asText(productDetails.path("sellingPrice").asText("")));
+                .asText(productDetails.path("salePrice").asText(productDetails.path("sellingPrice").asText("")));
+
+        if (!pricing.isMissingNode()) {
+            String pFinal = pricing.path("finalPrice").asText("");
+            String pBase = pricing.path("basePrice").asText(pricing.path("mrp").asText("0"));
+            if (!pFinal.isEmpty()) {
+                discountedStr = pFinal;
+                originalStr = pBase.isEmpty() ? pFinal : pBase;
+            }
+        }
 
         double original   = parsePrice(originalStr);
         double discounted = discountedStr.isEmpty() ? original : parsePrice(discountedStr);
@@ -126,16 +124,9 @@ public class OfferService {
 
     private JsonNode bgsGet(String path) {
         try {
-            String url = bgsBaseUrl + path;
-            HttpHeaders h = new HttpHeaders();
-            h.setContentType(MediaType.APPLICATION_JSON);
-            h.set("X-Tenant-ID", bgsTenantId);
-            ResponseEntity<JsonNode> resp = restTemplate.exchange(
-                    url, HttpMethod.GET, new HttpEntity<>(h), JsonNode.class);
-            log.info("[OfferService] GET " + path + " → " + resp.getStatusCode());
-            return resp.getBody();
+            return bgsApiClient.get(path);
         } catch (Exception e) {
-            log.warning("[OfferService] Error calling " + path + ": " + e.getMessage());
+            log.warn("[OfferService] Error calling {}: {}", path, e.getMessage());
             return null;
         }
     }
