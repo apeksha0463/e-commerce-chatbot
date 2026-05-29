@@ -1,35 +1,27 @@
 package com.example.whatsapp.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.example.whatsapp.client.BgsApiClient;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.logging.Logger;
 
 /**
  * Handles order creation.
  * Calls the BGS backend API to place the order.
  */
 @Service
+@Slf4j
 public class OrderService {
 
-    private static final Logger log = Logger.getLogger(OrderService.class.getName());
-
     @Autowired
-    private RestTemplate restTemplate;
-
-    @Value("${bgs.base-url:https://be.bgsinfotech.com}")
-    private String bgsBaseUrl;
-
-    @Value("${bgs.tenant-id:697c756692a4f15176fefe8e}")
-    private String bgsTenantId;
+    private BgsApiClient bgsApiClient;
 
     @Value("${bgs.customer-token:}")
     private String customerToken;
@@ -48,7 +40,7 @@ public class OrderService {
             // Generate a fallback local order ID just in case
             String localOrderId = "YOT-" + (100000 + new Random().nextInt(900000));
 
-            String url = bgsBaseUrl + "/orders/orders";
+            String url = "/orders/orders";
 
             // Build items array as per spec
             Map<String, Object> item = new HashMap<>();
@@ -74,22 +66,11 @@ public class OrderService {
             paymentData.put("method", paymentMethod);
             body.put("payment", paymentData);
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("X-Tenant-ID", bgsTenantId);
+            log.info("[OrderService] Calling POST /orders/orders to create order for {}", phone);
 
-            // Add Authorization header if customerToken is provided
-            if (customerToken != null && !customerToken.isBlank()) {
-                headers.set("Authorization", "Bearer " + customerToken);
-            }
+            JsonNode json = bgsApiClient.post("/orders/orders", body, customerToken);
 
-            log.info("[OrderService] Calling POST " + url + " to create order for " + phone);
-
-            ResponseEntity<JsonNode> resp = restTemplate.postForEntity(
-                    url, new HttpEntity<>(body, headers), JsonNode.class);
-
-            if (resp.getStatusCode().is2xxSuccessful() && resp.getBody() != null) {
-                JsonNode json = resp.getBody();
+            if (json != null) {
                 String finalOrderId = localOrderId;
                 
                 // If backend returns a specific _id or orderId, use it for subsequent payment calls
@@ -108,15 +89,15 @@ public class OrderService {
                     finalOrderId = json.path("orderId").asText();
                 }
 
-                log.info("[OrderService] ✅ Order successfully created via API. ID: " + finalOrderId);
+                log.info("[OrderService] ✅ Order successfully created via API. ID: {}", finalOrderId);
                 return OrderResult.success(finalOrderId);
             } else {
-                log.warning("[OrderService] Backend returned non-success code: " + resp.getStatusCode());
+                log.warn("[OrderService] Backend returned null response or non-success code");
                 return OrderResult.failure("Failed to create order on BGS backend.");
             }
 
         } catch (Exception e) {
-            log.severe("[OrderService] ❌ Failed to create order API call: " + e.getMessage());
+            log.error("[OrderService] ❌ Failed to create order API call: {}", e.getMessage(), e);
             return OrderResult.failure(e.getMessage());
         }
     }
