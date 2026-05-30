@@ -95,8 +95,18 @@ public class BgsApiClient {
     )
     @CircuitBreaker(name = "bgsApi")
     public JsonNode put(String path) {
+        return put(path, null);
+    }
+
+    @Retryable(
+            value = {Exception.class},
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 1000, multiplier = 2)
+    )
+    @CircuitBreaker(name = "bgsApi")
+    public JsonNode put(String path, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
-        HttpEntity<Void> entity = new HttpEntity<>(getHeaders());
+        HttpEntity<Void> entity = new HttpEntity<>(getHeadersWithAuth(customerToken));
         
         try {
             ResponseEntity<JsonNode> response = restTemplate.exchange(url, HttpMethod.PUT, entity, JsonNode.class);
