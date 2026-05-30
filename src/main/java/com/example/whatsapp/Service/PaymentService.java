@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.example.whatsapp.client.BgsApiClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,9 @@ public class PaymentService {
 
     @Autowired
     private BgsApiClient bgsApiClient;
+
+    @Value("${bgs.customer-token:}")
+    private String customerToken;
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -77,7 +81,7 @@ public class PaymentService {
             String path = "/orders/orders/initiate-payment/" + orderId + "?method=" + mappedMethod;
 
             log.info("[PaymentService] Initiating BGS payment PUT request: {}", path);
-            JsonNode json = bgsApiClient.put(path);
+            JsonNode json = bgsApiClient.put(path, customerToken);
 
             String sessionId = null;
             if (json != null) {
