@@ -28,11 +28,9 @@ public class AuthService {
      */
     public String authenticateUser(String phone) {
         try {
-            // TODO: Update this to the EXACT endpoint used by BGS backend for customer login via WhatsApp
-            String authEndpoint = "/auth/whatsapp/login"; // Placeholder
+            String authEndpoint = "/api/auth/whatsapp/login";
 
             Map<String, Object> payload = new HashMap<>();
-            // TODO: Update the payload key if the backend expects something other than "phone"
             payload.put("phone", phone);
 
             log.info("[AuthService] Authenticating user {} with BGS backend", phone);
@@ -41,15 +39,10 @@ public class AuthService {
             JsonNode response = bgsApiClient.post(authEndpoint, payload);
 
             if (response != null) {
-                // TODO: Update these paths if the token is returned in a different JSON structure
                 String token = null;
                 
-                if (response.has("data") && response.path("data").has("token")) {
-                    token = response.path("data").path("token").asText();
-                } else if (response.has("token")) {
+                if (response.has("token")) {
                     token = response.path("token").asText();
-                } else if (response.has("accessToken")) {
-                    token = response.path("accessToken").asText();
                 }
 
                 if (token != null && !token.isBlank() && !token.equals("null")) {
