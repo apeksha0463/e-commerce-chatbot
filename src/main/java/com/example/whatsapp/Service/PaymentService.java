@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.example.whatsapp.client.BgsApiClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Service;
@@ -23,8 +22,6 @@ public class PaymentService {
     @Autowired
     private BgsApiClient bgsApiClient;
 
-    @Value("${bgs.customer-token:}")
-    private String customerToken;
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
@@ -44,12 +41,13 @@ public class PaymentService {
     public PaymentResult generatePaymentLink(String orderId,
                                              String phone,
                                              String amount,
-                                             String paymentMethod) {
+                                             String paymentMethod,
+                                             String userAuthToken) {
         try {
             log.info("[PaymentService] Generating link for order {}", orderId);
 
             // ── Try BGS backend payment endpoint first ─────────────────
-            String link = callBgsPaymentEndpoint(orderId, phone, amount, paymentMethod);
+            String link = callBgsPaymentEndpoint(orderId, phone, amount, paymentMethod, userAuthToken);
             if (link != null && !link.isBlank()) {
                 log.info("[PaymentService] ✅ Link from BGS: {}", link);
                 return PaymentResult.success(link);
@@ -69,7 +67,8 @@ public class PaymentService {
     private String callBgsPaymentEndpoint(String orderId,
                                            String phone,
                                            String amount,
-                                           String method) {
+                                           String method,
+                                           String userAuthToken) {
         try {
             String mappedMethod = "UPI";
             if ("ONLINE".equalsIgnoreCase(method)) {
@@ -81,7 +80,7 @@ public class PaymentService {
             String path = "/orders/orders/initiate-payment/" + orderId + "?method=" + mappedMethod;
 
             log.info("[PaymentService] Initiating BGS payment PUT request: {}", path);
-            JsonNode json = bgsApiClient.put(path, customerToken);
+            JsonNode json = bgsApiClient.put(path, userAuthToken);
 
             String sessionId = null;
             if (json != null) {
@@ -100,7 +99,7 @@ public class PaymentService {
 
             if (sessionId == null || sessionId.isBlank()) {
                 log.info("[PaymentService] Session ID not returned immediately, starting polling...");
-                sessionId = pollForSessionId(orderId);
+                sessionId = pollForSessionId(orderId, userAuthToken);
             }
 
             if (sessionId != null && !sessionId.isBlank()) {
@@ -112,12 +111,12 @@ public class PaymentService {
         return null;
     }
 
-    private String pollForSessionId(String trackingId) {
+    private String pollForSessionId(String trackingId, String userAuthToken) {
         String path = "/payments/api/payments/cashfree/payment/" + trackingId;
         for (int i = 1; i <= 6; i++) {
             try {
                 log.info("[PaymentService] Polling payment session (attempt {}/6) for: {}", i, trackingId);
-                JsonNode json = bgsApiClient.get(path);
+                JsonNode json = bgsApiClient.get(path, userAuthToken);
 
                 if (json != null) {
                     JsonNode cfResp = json.path("cashFreeResponse");
