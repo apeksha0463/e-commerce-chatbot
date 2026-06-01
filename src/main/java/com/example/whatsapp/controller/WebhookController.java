@@ -40,10 +40,14 @@ public class WebhookController {
     @Autowired
     private OfferService offerService;
 
-
+    @Autowired
+    private AuthService authService;
 
     @Autowired
     private ValidationService validationService;
+
+    @Value("${app.bot.api-secret:}")
+    private String botApiSecret;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -70,6 +74,9 @@ public class WebhookController {
     private static final Map<String, Long> lastInteractionTime = new ConcurrentHashMap<>();
     private static final Map<String, String> userState = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> userData = new ConcurrentHashMap<>();
+    
+    // Stores tokens pushed from external signup (Key: Phone number, Value: BGS Auth Token)
+    private static final Map<String, String> bgsUserTokens = new ConcurrentHashMap<>();
 
     private String getOrCreateToken(String phone) {
         return phoneTokenMap.computeIfAbsent(phone, k -> UUID.randomUUID().toString());
@@ -108,6 +115,30 @@ public class WebhookController {
         return "Webhook is running";
     }
 
+    // --- POST /api/external/signup - push auth tokens -----------------------
+    @PostMapping("/api/external/signup")
+    public ResponseEntity<Map<String, String>> externalSignup(
+            @RequestHeader(value = "X-Bot-API-Secret", required = false) String secret,
+            @RequestBody JsonNode payload) {
+            
+        // Security Handshake: Ensure the request is actually from your trusted BGS Backend
+        if (botApiSecret != null && !botApiSecret.isEmpty() && !botApiSecret.equals(secret)) {
+            log.warn("Unauthorized attempt to push external signup token!");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("status", "error", "message", "Invalid API Secret"));
+        }
+
+        String phone = payload.path("phone").asText("").trim();
+        String authToken = payload.path("authToken").asText("").trim();
+
+        if (phone.isEmpty() || authToken.isEmpty()) {
+            return badRequest("Both 'phone' and 'authToken' are required.");
+        }
+
+        bgsUserTokens.put(phone, authToken);
+        log.info("External signup successful for phone: {}. Token stored.", phone);
+        return ok("Signup successful in bot context");
+    }
+
     // --- POST /messages/whatsapp - main handler -----------------------------
     @PostMapping("/messages/whatsapp")
     public ResponseEntity<Map<String, String>> receiveMessage(@RequestBody JsonNode body) {
@@ -135,6 +166,24 @@ public class WebhookController {
 
             String token = getOrCreateToken(phone);
             lastInteractionTime.put(token, System.currentTimeMillis());
+
+            // Authenticate user with BGS if not already authenticated
+            String bgsAuthToken = (String) getUserData(token).get("authToken");
+            if (bgsAuthToken == null) {
+                // Try fetching from the external signup map first
+                bgsAuthToken = bgsUserTokens.get(phone);
+                
+                if (bgsAuthToken == null) {
+                    // Fallback to internal auth service
+                    bgsAuthToken = authService.authenticateUser(phone);
+                }
+                
+                if (bgsAuthToken != null) {
+                    getUserData(token).put("authToken", bgsAuthToken);
+                } else {
+                    log.warn("Failed to authenticate user {} with BGS backend", phone);
+                }
+            }
 
             String state = userState.getOrDefault(token, STATE_START);
             String reply;
@@ -346,6 +395,12 @@ public class WebhookController {
         String address = (String) d.get("orderAddress");
         String pincode = (String) d.get("orderPincode");
         String payment = (String) d.get("paymentMethod");
+        String authToken = (String) d.get("authToken");
+        
+        if (authToken == null) {
+            log.error("Cannot process order for {}: Missing BGS auth token.", phone);
+            return "Oops! We could not verify your account with our backend. Please type 0 to start over.";
+        }
 
         // 1. Re‑validate Stock (CRITICAL)
         JsonNode details = bgsGet("/product/items/" + prodId);
@@ -355,7 +410,7 @@ public class WebhookController {
 
         // 2. Create Order in Backend
         OrderService.OrderResult orderRes = orderService.createOrder(
-                phone, prodId, prodName, finalPrice, name, address, pincode, payment);
+                phone, prodId, prodName, finalPrice, name, address, pincode, payment, authToken);
 
         if (!orderRes.success) {
             log.error("Order creation failed for {}: {}", phone, orderRes.errorMessage);
@@ -371,7 +426,7 @@ public class WebhookController {
         // 3. Generate Payment Link if not COD
         if (!"COD".equals(payment)) {
             PaymentService.PaymentResult payRes = paymentService.generatePaymentLink(
-                    orderId, phone, finalPrice, payment);
+                    orderId, phone, finalPrice, payment, authToken);
 
             if (payRes.success) {
                 msg.append("\n\n*Please complete your payment here:*\n").append(payRes.paymentLink);
