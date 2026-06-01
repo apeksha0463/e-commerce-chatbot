@@ -23,9 +23,6 @@ public class OrderService {
     @Autowired
     private BgsApiClient bgsApiClient;
 
-    @Value("${bgs.customer-token:}")
-    private String customerToken;
-
     // ─────────────────────────────────────────────────────────────────────────
 
     public OrderResult createOrder(String phone,
@@ -35,7 +32,8 @@ public class OrderService {
                                    String customerName,
                                    String address,
                                    String pincode,
-                                   String paymentMethod) {
+                                   String paymentMethod,
+                                   String userAuthToken) {
         try {
             // Generate a fallback local order ID just in case
             String localOrderId = "YOT-" + (100000 + new Random().nextInt(900000));
@@ -68,7 +66,7 @@ public class OrderService {
 
             log.info("[OrderService] Calling POST /orders/orders to create order for {}", phone);
 
-            JsonNode json = bgsApiClient.post("/orders/orders", body, customerToken);
+            JsonNode json = bgsApiClient.post("/orders/orders", body, userAuthToken);
 
             if (json != null) {
                 String finalOrderId = localOrderId;
