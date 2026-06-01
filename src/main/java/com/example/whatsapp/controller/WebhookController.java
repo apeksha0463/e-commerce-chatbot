@@ -99,6 +99,7 @@ public class WebhookController {
                 if (phone != null) {
                     sendAiSensyReply(phone, "⏳ Your session has timed out due to inactivity. Type *hi* to start over.");
                     phoneTokenMap.remove(phone);
+                    bgsUserTokens.remove(phone);
                 }
 
                 userState.remove(token);
@@ -170,8 +171,8 @@ public class WebhookController {
             // Authenticate user with BGS if not already authenticated
             String bgsAuthToken = (String) getUserData(token).get("authToken");
             if (bgsAuthToken == null) {
-                // Try fetching from the external signup map first
-                bgsAuthToken = bgsUserTokens.get(phone);
+                // Try fetching from the external signup map first (consume it)
+                bgsAuthToken = bgsUserTokens.remove(phone);
                 
                 if (bgsAuthToken == null) {
                     // Fallback to internal auth service
@@ -414,6 +415,8 @@ public class WebhookController {
 
         if (!orderRes.success) {
             log.error("Order creation failed for {}: {}", phone, orderRes.errorMessage);
+            // Clear the token so it gets refreshed on the next interaction if it was an auth issue
+            getUserData(token).remove("authToken");
             return "Oops! Something went wrong while creating your order. Please try again later or contact support.";
         }
 
