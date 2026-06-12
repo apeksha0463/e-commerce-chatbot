@@ -2,7 +2,8 @@ package com.example.whatsapp.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.example.whatsapp.client.BgsApiClient;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -17,8 +18,9 @@ import java.util.Random;
  * Calls the BGS backend API to place the order.
  */
 @Service
-@Slf4j
 public class OrderService {
+
+    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
     @Autowired
     private BgsApiClient bgsApiClient;

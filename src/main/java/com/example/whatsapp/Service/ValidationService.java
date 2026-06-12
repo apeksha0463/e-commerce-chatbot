@@ -1,7 +1,6 @@
 package com.example.whatsapp.service;
 
 import com.example.whatsapp.config.AppProperties;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 /**
@@ -9,10 +8,13 @@ import org.springframework.stereotype.Service;
  * Extend isServiceable() to call a real logistics API if available.
  */
 @Service
-@RequiredArgsConstructor
 public class ValidationService {
 
     private final AppProperties appProperties;
+
+    public ValidationService(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
 
     // ── Address ──────────────────────────────────────────────────────────────
 

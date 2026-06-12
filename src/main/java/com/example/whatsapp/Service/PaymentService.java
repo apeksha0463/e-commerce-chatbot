@@ -2,7 +2,8 @@ package com.example.whatsapp.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.example.whatsapp.client.BgsApiClient;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.retry.annotation.Backoff;
@@ -16,8 +17,9 @@ import org.springframework.stereotype.Service;
  * replacing the stub implementation below.
  */
 @Service
-@Slf4j
 public class PaymentService {
+
+    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
 
     @Autowired
     private BgsApiClient bgsApiClient;

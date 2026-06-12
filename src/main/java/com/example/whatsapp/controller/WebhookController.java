@@ -13,14 +13,16 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.springframework.scheduling.annotation.Scheduled;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.example.whatsapp.config.AppProperties;
 import com.example.whatsapp.client.BgsApiClient;
 
 @CrossOrigin(origins = "*")
 @RestController
-@Slf4j
 public class WebhookController {
+
+    private static final Logger log = LoggerFactory.getLogger(WebhookController.class);
 
     @Autowired
     private RestTemplate restTemplate;
@@ -552,7 +554,10 @@ public class WebhookController {
 
         // Attempt carousel; fall back to text listing on failure or no valid images
         if (carouselDebug) logCarouselDebugSummary("Category", cardMeta);
-        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards)) {
+        // Extract first valid card's name + label for body {{1}} and {{2}}
+        String firstValidCat = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[0]).orElse("Products");
+        String firstLabelCat = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[1]).orElse("Browse Collection");
+        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidCat, firstLabelCat)) {
             return CAROUSEL_SENT;
         }
         log.info("[Carousel][Category] Falling back to text listing for {}", phone);
@@ -675,7 +680,10 @@ public class WebhookController {
 
         // Attempt carousel; fall back to text listing on failure or no valid images
         if (carouselDebug) logCarouselDebugSummary("Product", cardMeta);
-        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards)) {
+        // Pass first card's name + price as global body {{1}} and {{2}}
+        String firstValidProd = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[0]).orElse("Product");
+        String firstPriceProd = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[1]).orElse("Check price");
+        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidProd, firstPriceProd)) {
             return CAROUSEL_SENT;
         }
         log.info("[Carousel][Product] Falling back to text listing for {}", phone);
@@ -864,14 +872,33 @@ public class WebhookController {
      * Logs a human-readable pre-send carousel summary, then POSTs the yotindia_carousel
      * template to AiSensy. Returns true on HTTP 2xx; false on any error.
      */
-    private boolean sendCarouselReply(String phone, List<Map<String, Object>> cards) {
+    /**
+     * Sends the yotindia_carousel template to AiSensy.
+     * bodyParam1 = {{1}} in the template body (e.g. first card name)
+     * bodyParam2 = {{2}} in the template body (e.g. first card price/label)
+     * These MUST be non-empty — Meta counts blank strings as 0 localizable_params (#132000).
+     */
+    private boolean sendCarouselReply(String phone, List<Map<String, Object>> cards,
+                                      String bodyParam1, String bodyParam2) {
         if (cards == null || cards.isEmpty()) return false;
+        // Ensure params are never blank — Meta rejects empty string as "no param"
+        String p1 = (bodyParam1 != null && !bodyParam1.isBlank()) ? bodyParam1 : "Products";
+        String p2 = (bodyParam2 != null && !bodyParam2.isBlank()) ? bodyParam2 : "Shop now";
         try {
             String url = "https://apis.aisensy.com/project-apis/v1/project/"
                     + appProperties.getAisensy().getProjectId() + "/messages";
 
             Map<String, Object> langMap = new HashMap<>();
             langMap.put("code", "en");
+
+            // Global body component: provides values for {{1}} and {{2}} in the template bubble.
+            // Must use REAL non-empty text — Meta rejects empty strings as 0 localizable_params.
+            Map<String, Object> bodyComp = new HashMap<>();
+            bodyComp.put("type", "body");
+            bodyComp.put("parameters", List.of(
+                    Map.of("type", "text", "text", p1),
+                    Map.of("type", "text", "text", p2)
+            ));
 
             Map<String, Object> carouselComp = new HashMap<>();
             carouselComp.put("type", "carousel");
@@ -880,7 +907,7 @@ public class WebhookController {
             Map<String, Object> template = new HashMap<>();
             template.put("name", "yotindia_carousel");
             template.put("language", langMap);
-            template.put("components", List.of(carouselComp));
+            template.put("components", List.of(bodyComp, carouselComp));
 
             Map<String, Object> payload = new HashMap<>();
             payload.put("to", phone);

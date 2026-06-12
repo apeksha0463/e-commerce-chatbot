@@ -3,8 +3,8 @@ package com.example.whatsapp.client;
 import com.example.whatsapp.config.AppProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.*;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
@@ -14,12 +14,17 @@ import org.springframework.web.client.RestTemplate;
 import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
-@Slf4j
 public class BgsApiClient {
+
+    private static final Logger log = LoggerFactory.getLogger(BgsApiClient.class);
 
     private final RestTemplate restTemplate;
     private final AppProperties appProperties;
+
+    public BgsApiClient(RestTemplate restTemplate, AppProperties appProperties) {
+        this.restTemplate = restTemplate;
+        this.appProperties = appProperties;
+    }
 
     private HttpHeaders getHeaders() {
         HttpHeaders headers = new HttpHeaders();
@@ -98,6 +103,7 @@ public class BgsApiClient {
             throw e;
         }
     }
+
     @Retryable(
             value = {Exception.class},
             maxAttempts = 3,
