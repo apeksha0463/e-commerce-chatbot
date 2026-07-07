@@ -13,6 +13,18 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
 
+/**
+ * HTTP client for all BGS backend API calls.
+ *
+ * IMPORTANT — AOP self-call note:
+ * Spring AOP intercepts @Retryable and @CircuitBreaker only on calls made
+ * THROUGH the proxy (i.e. from outside this class). Internal calls like
+ * get(path) → get(path, null) bypass the proxy entirely, so annotations on
+ * the no-auth overloads would be silently ignored.
+ *
+ * FIX: Only the full-signature methods (those with `customerToken`) carry
+ * the AOP annotations. The convenience no-token overloads are plain delegates.
+ */
 @Service
 public class BgsApiClient {
 
@@ -25,6 +37,8 @@ public class BgsApiClient {
         this.restTemplate = restTemplate;
         this.appProperties = appProperties;
     }
+
+    // ── Header builders ──────────────────────────────────────────────────────
 
     private HttpHeaders getHeaders() {
         HttpHeaders headers = new HttpHeaders();
@@ -41,16 +55,23 @@ public class BgsApiClient {
         return headers;
     }
 
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    @CircuitBreaker(name = "bgsApi")
+    // ── GET ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Convenience overload — no auth token. Delegates to the annotated method
+     * through the Spring context so AOP works correctly; use the injected bean
+     * rather than calling this directly when you need retry/circuit-breaker on
+     * anonymous calls.
+     */
     public JsonNode get(String path) {
         return get(path, null);
     }
 
+    /**
+     * Full GET with optional auth token.
+     * @Retryable and @CircuitBreaker are applied HERE (not on the overload above)
+     * to avoid the Spring AOP self-invocation bypass.
+     */
     @Retryable(
             value = {Exception.class},
             maxAttempts = 3,
@@ -60,26 +81,34 @@ public class BgsApiClient {
     public JsonNode get(String path, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
         HttpEntity<Void> entity = new HttpEntity<>(getHeadersWithAuth(customerToken));
-        
+
         try {
-            ResponseEntity<JsonNode> response = restTemplate.exchange(url, HttpMethod.GET, entity, JsonNode.class);
+            ResponseEntity<JsonNode> response = restTemplate.exchange(
+                    url, HttpMethod.GET, entity, JsonNode.class);
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                log.error("[BGS Client] GET {} returned non-2xx status: {}",
+                        url, response.getStatusCode());
+                return null;
+            }
             return response.getBody();
         } catch (Exception e) {
-            log.error("[BGS Client] GET request failed for path {}: {}", path, e.getMessage());
+            log.error("[BGS Client] GET request failed for URL {}: {}", url, e.getMessage());
             throw e;
         }
     }
 
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    @CircuitBreaker(name = "bgsApi")
+    // ── POST ─────────────────────────────────────────────────────────────────
+
+    /** Convenience overload — no auth token. */
     public JsonNode post(String path, Map<String, Object> body) {
         return post(path, body, null);
     }
 
+    /**
+     * Full POST with optional auth token.
+     * Retry and circuit-breaker annotations live here only.
+     */
     @Retryable(
             value = {Exception.class},
             maxAttempts = 3,
@@ -95,25 +124,27 @@ public class BgsApiClient {
             if (response.getStatusCode().is2xxSuccessful()) {
                 return response.getBody();
             } else {
-                log.error("[BGS Client] POST request returned non-2xx status for path {}: {}", path, response.getStatusCode());
+                log.error("[BGS Client] POST {} returned non-2xx status: {}",
+                        url, response.getStatusCode());
                 return null;
             }
         } catch (Exception e) {
-            log.error("[BGS Client] POST request failed for path {}: {}", path, e.getMessage());
+            log.error("[BGS Client] POST request failed for URL {}: {}", url, e.getMessage());
             throw e;
         }
     }
 
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    @CircuitBreaker(name = "bgsApi")
+    // ── PUT ──────────────────────────────────────────────────────────────────
+
+    /** Convenience overload — no auth token. */
     public JsonNode put(String path) {
         return put(path, null);
     }
 
+    /**
+     * Full PUT with optional auth token.
+     * Retry and circuit-breaker annotations live here only.
+     */
     @Retryable(
             value = {Exception.class},
             maxAttempts = 3,
@@ -123,12 +154,19 @@ public class BgsApiClient {
     public JsonNode put(String path, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
         HttpEntity<Void> entity = new HttpEntity<>(getHeadersWithAuth(customerToken));
-        
+
         try {
-            ResponseEntity<JsonNode> response = restTemplate.exchange(url, HttpMethod.PUT, entity, JsonNode.class);
+            ResponseEntity<JsonNode> response = restTemplate.exchange(
+                    url, HttpMethod.PUT, entity, JsonNode.class);
+
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                log.error("[BGS Client] PUT {} returned non-2xx status: {}",
+                        url, response.getStatusCode());
+                return null;
+            }
             return response.getBody();
         } catch (Exception e) {
-            log.error("[BGS Client] PUT request failed for path {}: {}", path, e.getMessage());
+            log.error("[BGS Client] PUT request failed for URL {}: {}", url, e.getMessage());
             throw e;
         }
     }

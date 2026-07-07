@@ -1,6 +1,8 @@
 package com.example.whatsapp.service;
 
 import com.example.whatsapp.config.AppProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -10,13 +12,15 @@ import org.springframework.stereotype.Service;
 @Service
 public class ValidationService {
 
+    private static final Logger log = LoggerFactory.getLogger(ValidationService.class);
+
     private final AppProperties appProperties;
 
     public ValidationService(AppProperties appProperties) {
         this.appProperties = appProperties;
     }
 
-    // ── Address ──────────────────────────────────────────────────────────────
+    // ── Address ───────────────────────────────────────────────────────────────
 
     public boolean isAddressValid(String address) {
         return address != null
@@ -32,23 +36,28 @@ public class ValidationService {
     // ── Pincode ───────────────────────────────────────────────────────────────
 
     public boolean isPincodeValid(String pincode) {
-        return pincode != null
-                && pincode.trim().matches("\\d{" + appProperties.getValidation().getPincodeLength() + "}");
+        if (pincode == null) return false;
+        return pincode.trim().matches("\\d{" + appProperties.getValidation().getPincodeLength() + "}");
     }
 
     public String pincodeErrorMessage() {
-        return "Please enter a valid *" + appProperties.getValidation().getPincodeLength() + "-digit pincode* (numbers only).\n"
-                + "Example: _400001_";
+        return "Please enter a valid *" + appProperties.getValidation().getPincodeLength()
+                + "-digit pincode* (numbers only).\nExample: _400001_";
     }
 
     // ── Serviceability ────────────────────────────────────────────────────────
 
     /**
-     * Stub: always serviceable. Replace with real logistics API call.
+     * STUB — currently always returns true (all pincodes are considered serviceable).
+     * TODO: Replace with a real logistics API call when available.
      * Example: GET https://api.logistics.com/serviceable?pincode={pincode}
+     *
+     * NOTE: Input is trimmed for consistency with isPincodeValid().
      */
     public boolean isServiceable(String pincode) {
-        // TODO: call real logistics API
+        String normalized = (pincode != null) ? pincode.trim() : "";
+        log.debug("[ValidationService] Serviceability check for pincode '{}' — stub returns true", normalized);
+        // TODO: integrate real logistics/serviceability API here
         return true;
     }
 

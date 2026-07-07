@@ -5,21 +5,24 @@ import com.example.whatsapp.client.BgsApiClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.retry.annotation.Retryable;
-import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Service;
 
 /**
  * Generates payment links for UPI / Card / Online orders.
  * COD orders skip this entirely.
  *
- * Integrate with a real payment gateway (Razorpay, PayU, etc.) by
- * replacing the stub implementation below.
+ * NOTE: @Retryable is intentionally NOT placed here.
+ * BgsApiClient already applies @Retryable (maxAttempts=3) on all its HTTP calls,
+ * adding another @Retryable here would result in up to 9 total attempts (3 × 3),
+ * causing excessive delays and load on the BGS backend.
  */
 @Service
 public class PaymentService {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+
+    private static final int POLL_MAX_ATTEMPTS   = 6;
+    private static final long POLL_DELAY_MS      = 2000L;
 
     @Autowired
     private BgsApiClient bgsApiClient;
@@ -32,125 +35,143 @@ public class PaymentService {
      * @param orderId       the order ID returned by the backend
      * @param phone         customer phone
      * @param amount        final amount as string (e.g. "1299")
-     * @param paymentMethod UPI | Online/Card
+     * @param paymentMethod UPI | ONLINE
+     * @param userAuthToken BGS bearer token for the customer
      * @return PaymentResult with success flag and payment link (or error)
      */
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
     public PaymentResult generatePaymentLink(String orderId,
                                              String phone,
                                              String amount,
                                              String paymentMethod,
                                              String userAuthToken) {
         try {
-            log.info("[PaymentService] Generating link for order {}", orderId);
+            log.info("[PaymentService] Generating payment link for order={}, phone={}, method={}",
+                    orderId, phone, paymentMethod);
 
-            // ── Try BGS backend payment endpoint first ─────────────────
-            String link = callBgsPaymentEndpoint(orderId, phone, amount, paymentMethod, userAuthToken);
+            String link = callBgsPaymentEndpoint(orderId, paymentMethod, userAuthToken);
+
             if (link != null && !link.isBlank()) {
-                log.info("[PaymentService] ✅ Link from BGS: {}", link);
+                log.info("[PaymentService] ✅ Payment link obtained for order {}: {}", orderId, link);
                 return PaymentResult.success(link);
             }
 
-            log.warn("[PaymentService] Yielded no link.");
+            log.warn("[PaymentService] BGS did not return a payment link for order {}", orderId);
 
         } catch (Exception e) {
-            log.error("[PaymentService] ❌ Failed: {}", e.getMessage(), e);
-            throw new RuntimeException("Payment generation failed", e);
+            log.error("[PaymentService] ❌ Failed to generate payment link for order {}: {}",
+                    orderId, e.getMessage(), e);
         }
+
         return PaymentResult.failure("Payment gateway did not return a link.");
     }
 
     // ── BGS backend ───────────────────────────────────────────────────────────
 
     private String callBgsPaymentEndpoint(String orderId,
-                                           String phone,
-                                           String amount,
-                                           String method,
-                                           String userAuthToken) {
+                                          String method,
+                                          String userAuthToken) {
+        // Map chatbot payment method to BGS API expected value
+        String mappedMethod = "ONLINE".equalsIgnoreCase(method) ? "ONLINE" : "UPI";
+
+        String path = "/orders/orders/initiate-payment/" + orderId + "?method=" + mappedMethod;
+        log.info("[PaymentService] PUT {} for order {}", path, orderId);
+
         try {
-            String mappedMethod = "UPI";
-            if ("ONLINE".equalsIgnoreCase(method)) {
-                mappedMethod = "ONLINE";
-            } else if ("UPI".equalsIgnoreCase(method)) {
-                mappedMethod = "UPI";
-            }
-
-            String path = "/orders/orders/initiate-payment/" + orderId + "?method=" + mappedMethod;
-
-            log.info("[PaymentService] Initiating BGS payment PUT request: {}", path);
             JsonNode json = bgsApiClient.put(path, userAuthToken);
-
-            String sessionId = null;
-            if (json != null) {
-                JsonNode cfResp = json.path("cashFreeResponse");
-                if (cfResp.isMissingNode() && json.has("data")) {
-                    cfResp = json.path("data").path("cashFreeResponse");
-                }
-                
-                if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
-                    sessionId = cfResp.path("payment_session_id").asText();
-                    if (sessionId != null && sessionId.equals("null")) {
-                        sessionId = null;
-                    }
-                }
-            }
+            String sessionId = extractSessionId(json);
 
             if (sessionId == null || sessionId.isBlank()) {
-                log.info("[PaymentService] Session ID not returned immediately, starting polling...");
+                // NOTE: BGS returns the payment session ID asynchronously.
+                // Polling blocks the servlet thread for up to POLL_MAX_ATTEMPTS × POLL_DELAY_MS ms.
+                // This is a BGS backend limitation — chatbot cannot fix the async response.
+                log.info("[PaymentService] Session ID not returned immediately — polling (max {}s)...",
+                        (POLL_MAX_ATTEMPTS * POLL_DELAY_MS / 1000));
                 sessionId = pollForSessionId(orderId, userAuthToken);
             }
 
             if (sessionId != null && !sessionId.isBlank()) {
-                return getCashfreeCheckoutUrl(sessionId);
+                return buildCashfreeCheckoutUrl(sessionId);
             }
+
         } catch (Exception e) {
-            log.warn("[PaymentService] BGS payment endpoint error: {}", e.getMessage());
+            log.warn("[PaymentService] BGS payment endpoint error for order {}: {}", orderId, e.getMessage());
         }
+
         return null;
     }
 
+    /**
+     * Extracts payment_session_id from a BGS payment response.
+     * Checks both root-level and nested data.cashFreeResponse.
+     */
+    private String extractSessionId(JsonNode json) {
+        if (json == null) return null;
+
+        // Try root-level cashFreeResponse first
+        JsonNode cfResp = json.path("cashFreeResponse");
+        if (cfResp.isMissingNode() && json.has("data")) {
+            cfResp = json.path("data").path("cashFreeResponse");
+        }
+
+        if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
+            String sessionId = cfResp.path("payment_session_id").asText("").trim();
+            if (!sessionId.isEmpty() && !sessionId.equals("null")) {
+                return sessionId;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Polls the BGS payment status endpoint until a session ID appears or attempts exhausted.
+     *
+     * WARNING: This method blocks the calling thread for up to
+     * POLL_MAX_ATTEMPTS × POLL_DELAY_MS = 12 seconds.
+     * This is a known trade-off due to the BGS backend's asynchronous payment init.
+     * Ensure RestTemplate readTimeout is configured > 12 seconds in application.properties.
+     */
     private String pollForSessionId(String trackingId, String userAuthToken) {
         String path = "/payments/api/payments/cashfree/payment/" + trackingId;
-        for (int i = 1; i <= 6; i++) {
-            try {
-                log.info("[PaymentService] Polling payment session (attempt {}/6) for: {}", i, trackingId);
-                JsonNode json = bgsApiClient.get(path, userAuthToken);
 
-                if (json != null) {
-                    JsonNode cfResp = json.path("cashFreeResponse");
-                    if (cfResp.isMissingNode() && json.has("data")) {
-                        cfResp = json.path("data").path("cashFreeResponse");
-                    }
-                    
-                    if (!cfResp.isMissingNode() && cfResp.has("payment_session_id")) {
-                        String sessionId = cfResp.path("payment_session_id").asText();
-                        if (sessionId != null && !sessionId.isBlank() && !sessionId.equals("null")) {
-                            log.info("[PaymentService] Found payment session ID: {}", sessionId);
-                            return sessionId;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("[PaymentService] Error during session polling: {}", e.getMessage());
-            }
+        for (int attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
             try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                break;
+                log.info("[PaymentService] Polling payment session (attempt {}/{}) for order: {}",
+                        attempt, POLL_MAX_ATTEMPTS, trackingId);
+
+                JsonNode json = bgsApiClient.get(path, userAuthToken);
+                String sessionId = extractSessionId(json);
+
+                if (sessionId != null && !sessionId.isBlank()) {
+                    log.info("[PaymentService] Found payment session ID on attempt {}: {}", attempt, sessionId);
+                    return sessionId;
+                }
+
+            } catch (Exception e) {
+                log.warn("[PaymentService] Error during polling attempt {}/{} for order {}: {}",
+                        attempt, POLL_MAX_ATTEMPTS, trackingId, e.getMessage());
+            }
+
+            if (attempt < POLL_MAX_ATTEMPTS) {
+                try {
+                    Thread.sleep(POLL_DELAY_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.warn("[PaymentService] Polling interrupted for order {}", trackingId);
+                    break;
+                }
             }
         }
+
+        log.warn("[PaymentService] Payment session ID not obtained after {} attempts for order {}",
+                POLL_MAX_ATTEMPTS, trackingId);
         return null;
     }
 
-    private String getCashfreeCheckoutUrl(String sessionId) {
+    private String buildCashfreeCheckoutUrl(String sessionId) {
+        // Cashfree uses URL fragment (#) for payment session routing — this is intentional per Cashfree docs
         return "https://payments.cashfree.com/order/#" + sessionId;
     }
-
 
     // ── Result wrapper ────────────────────────────────────────────────────────
 

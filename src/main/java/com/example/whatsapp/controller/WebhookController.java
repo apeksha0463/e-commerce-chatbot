@@ -55,92 +55,107 @@ public class WebhookController {
      * Set app.carousel.debug=false in application.properties to suppress verbose
      * carousel payload / response logs in production.
      */
-    @Value("${app.carousel.debug:true}")
+    @Value("${app.carousel.debug:false}")
     private boolean carouselDebug;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // --- State constants ----------------------------------------------------
-    private static final String STATE_START = "START";
-    private static final String STATE_MENU = "MENU";
-    private static final String STATE_CATEGORIES = "CATEGORIES";
-    private static final String STATE_SUBCATEGORIES = "SUBCATEGORIES";
-    private static final String STATE_PRODUCTS = "PRODUCTS";
+    private static final String STATE_START          = "START";
+    private static final String STATE_MENU           = "MENU";
+    private static final String STATE_CATEGORIES     = "CATEGORIES";
+    private static final String STATE_SUBCATEGORIES  = "SUBCATEGORIES";
+    private static final String STATE_PRODUCTS       = "PRODUCTS";
     private static final String STATE_PRODUCT_DETAILS = "PRODUCT_DETAILS";
+    private static final String STATE_ORDER_NAME     = "ORDER_NAME";
+    private static final String STATE_ORDER_PINCODE  = "ORDER_PINCODE";
+    private static final String STATE_ORDER_ADDRESS  = "ORDER_ADDRESS";
+    private static final String STATE_ORDER_PAYMENT  = "ORDER_PAYMENT";
+    private static final String STATE_ORDER_CONFIRM  = "ORDER_CONFIRM";
+    private static final String STATE_AWAITING_OTP   = "AWAITING_OTP";
 
-    // User Verification
-
-
-    // Order Flow
-    private static final String STATE_ORDER_NAME = "ORDER_NAME";
-    private static final String STATE_ORDER_PINCODE = "ORDER_PINCODE";
-    private static final String STATE_ORDER_ADDRESS = "ORDER_ADDRESS";
-    private static final String STATE_ORDER_PAYMENT = "ORDER_PAYMENT";
-    private static final String STATE_ORDER_CONFIRM = "ORDER_CONFIRM";
-
-    // Sentinel returned by fetchCategories/fetchProducts when carousel was sent successfully
+    /** Sentinel returned by fetchCategories/fetchProducts when carousel was sent successfully. */
     private static final String CAROUSEL_SENT = "__CAROUSEL_SENT__";
 
+    /**
+     * Keys preserved in userData on global reset (0/hi/menu).
+     * Everything else is cleared. authToken MUST be preserved to avoid re-auth on every menu visit.
+     */
+    private static final Set<String> PRESERVED_KEYS_ON_RESET =
+            Set.of("authToken", "refreshToken");
+
     // --- In-memory state stores ---------------------------------------------
-    private static final Map<String, String> phoneTokenMap = new ConcurrentHashMap<>();
-    private static final Map<String, Long> lastInteractionTime = new ConcurrentHashMap<>();
-    private static final Map<String, String> userState = new ConcurrentHashMap<>();
-    private static final Map<String, Map<String, Object>> userData = new ConcurrentHashMap<>();
-    
-    // Stores tokens pushed from external signup (Key: Phone number, Value: BGS Auth Token)
+    private static final Map<String, String>              phoneTokenMap       = new ConcurrentHashMap<>();
+    private static final Map<String, Long>                lastInteractionTime = new ConcurrentHashMap<>();
+    private static final Map<String, String>              userState           = new ConcurrentHashMap<>();
+    private static final Map<String, Map<String, Object>> userData            = new ConcurrentHashMap<>();
+
+    /** Tokens pushed from external signup (Key: Phone, Value: BGS Auth Token). */
     private static final Map<String, String> bgsUserTokens = new ConcurrentHashMap<>();
 
     private String getOrCreateToken(String phone) {
         return phoneTokenMap.computeIfAbsent(phone, k -> UUID.randomUUID().toString());
     }
 
-    @Scheduled(fixedDelay = 60000)
+    // =========================================================================
+    // SESSION CLEANUP (runs every 60 seconds)
+    // =========================================================================
+
+    @Scheduled(fixedDelay = 60_000)
     public void checkIdleSessions() {
-        long now = System.currentTimeMillis();
+        long now       = System.currentTimeMillis();
         long timeoutMs = TimeUnit.MINUTES.toMillis(appProperties.getSession().getTimeoutMinutes());
 
-        for (Map.Entry<String, Long> entry : lastInteractionTime.entrySet()) {
+        // Build a reverse phone→token lookup once to avoid O(n²) inner stream per entry
+        Map<String, String> tokenToPhone = new HashMap<>();
+        for (Map.Entry<String, String> e : phoneTokenMap.entrySet()) {
+            tokenToPhone.put(e.getValue(), e.getKey());
+        }
+
+        Iterator<Map.Entry<String, Long>> iter = lastInteractionTime.entrySet().iterator();
+        while (iter.hasNext()) {
+            Map.Entry<String, Long> entry = iter.next();
             String token = entry.getKey();
             if (now - entry.getValue() > timeoutMs) {
-                // Find phone for this token
-                String phone = phoneTokenMap.entrySet().stream()
-                        .filter(e -> e.getValue().equals(token))
-                        .map(Map.Entry::getKey)
-                        .findFirst().orElse(null);
-
+                String phone = tokenToPhone.get(token);
                 if (phone != null) {
                     sendAiSensyReply(phone, "⏳ Your session has timed out due to inactivity. Type *hi* to start over.");
                     phoneTokenMap.remove(phone);
                     bgsUserTokens.remove(phone);
+                    log.info("[Session] Timed out session for phone={}", phone);
                 }
-
                 userState.remove(token);
                 userData.remove(token);
-
-                lastInteractionTime.remove(token);
+                iter.remove();
             }
         }
     }
 
-    // --- GET /messages/whatsapp - health check ------------------------------
+    // =========================================================================
+    // HEALTH CHECK
+    // =========================================================================
+
     @GetMapping("/messages/whatsapp")
     public String testWebhook() {
         return "Webhook is running";
     }
 
-    // --- POST /api/external/signup - push auth tokens -----------------------
+    // =========================================================================
+    // EXTERNAL SIGNUP — BGS pushes auth token after user signs up on the website
+    // =========================================================================
+
     @PostMapping("/api/external/signup")
     public ResponseEntity<Map<String, String>> externalSignup(
             @RequestHeader(value = "X-Bot-API-Secret", required = false) String secret,
             @RequestBody JsonNode payload) {
-            
-        // Security Handshake: Ensure the request is actually from your trusted BGS Backend
+
         if (botApiSecret != null && !botApiSecret.isEmpty() && !botApiSecret.equals(secret)) {
-            log.warn("Unauthorized attempt to push external signup token!");
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("status", "error", "message", "Invalid API Secret"));
+            log.warn("[ExternalSignup] Unauthorized attempt — invalid API secret");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("status", "error", "message", "Invalid API Secret"));
         }
 
-        String phone = payload.path("phone").asText("").trim();
+        String phone     = payload.path("phone").asText("").trim();
         String authToken = payload.path("authToken").asText("").trim();
 
         if (phone.isEmpty() || authToken.isEmpty()) {
@@ -148,11 +163,14 @@ public class WebhookController {
         }
 
         bgsUserTokens.put(phone, authToken);
-        log.info("External signup successful for phone: {}. Token stored.", phone);
+        log.info("[ExternalSignup] Token stored for phone={}", phone);
         return ok("Signup successful in bot context");
     }
 
-    // --- POST /messages/whatsapp - main handler -----------------------------
+    // =========================================================================
+    // MAIN WEBHOOK HANDLER
+    // =========================================================================
+
     @PostMapping("/messages/whatsapp")
     public ResponseEntity<Map<String, String>> receiveMessage(@RequestBody JsonNode body) {
         log.info("=== Webhook HIT ===");
@@ -166,77 +184,72 @@ public class WebhookController {
                 return ok("ignored - bot message");
             }
 
-            String phone = msgNode.path("phone_number").asText("").trim();
+            String phone   = msgNode.path("phone_number").asText("").trim();
             String rawText = msgNode.path("message_content").path("text").asText("").trim();
-
             String buttonPayload = msgNode.path("message_content").path("button_payload").asText("").trim();
             String text = buttonPayload.isEmpty() ? rawText : buttonPayload;
 
-            if (phone.isEmpty())
-                return badRequest("Phone number missing");
-            if (text.isEmpty())
-                return ok("no text content");
+            if (phone.isEmpty()) return badRequest("Phone number missing");
+            if (text.isEmpty())  return ok("no text content");
 
             String token = getOrCreateToken(phone);
             lastInteractionTime.put(token, System.currentTimeMillis());
 
-            // Authenticate user with BGS if not already authenticated
-            String bgsAuthToken = (String) getUserData(token).get("authToken");
-            if (bgsAuthToken == null) {
-                // Try fetching from the external signup map first (consume it)
-                bgsAuthToken = bgsUserTokens.remove(phone);
-                
-                if (bgsAuthToken == null) {
-                    // Fallback to internal auth service
-                    bgsAuthToken = authService.authenticateUser(phone);
-                }
-                
-                if (bgsAuthToken != null) {
-                    getUserData(token).put("authToken", bgsAuthToken);
+            // Authenticate with BGS if not already done
+            if (!ensureAuthenticatedOrTriggerOtp(phone, token)) {
+                return ok("awaiting_otp");
+            }
+
+            String input = text.toLowerCase().trim();
+
+            if (STATE_AWAITING_OTP.equals(userState.getOrDefault(token, STATE_START))) {
+                AuthService.AuthResult authRes = authService.verifyOtp(phone, input);
+                if (authRes.success) {
+                    getUserData(token).put("authToken", authRes.jwt);
+                    getUserData(token).put("refreshToken", authRes.refreshToken);
+                    userState.put(token, STATE_MENU);
+                    sendAiSensyReply(phone, "✅ Login successful!\n\n" + buildMenuMessage());
                 } else {
-                    log.warn("Failed to authenticate user {} with BGS backend", phone);
+                    sendAiSensyReply(phone, "❌ Invalid OTP. Please try again.");
                 }
+                return ok("ok");
             }
 
             String state = userState.getOrDefault(token, STATE_START);
             String reply;
-            String next = state;
-
-            String input = text.toLowerCase().trim();
+            String next  = state;
 
             // Handle carousel "Order Now" button payload (e.g. "ORDER_2")
             if (text.startsWith("ORDER_")) {
                 String idxStr = text.substring("ORDER_".length());
-                String curState = userState.getOrDefault(token, STATE_START);
-                if (STATE_PRODUCTS.equals(curState)) {
+                if (STATE_PRODUCTS.equals(userState.getOrDefault(token, STATE_START))) {
                     List<Map<String, String>> prods = getListFromState(token, "productsJson");
                     Map<String, String> prod = matchByIndex(prods, idxStr);
                     if (prod != null) {
                         JsonNode details = bgsGet("/product/items/" + prod.get("id"));
                         if (details != null && isProductInStock(details)) {
                             OfferService.DiscountResult discount = offerService.applyBestOffer(details);
-                            getUserData(token).put("selectedId", prod.get("id"));
-                            getUserData(token).put("selectedName", details.path("name").asText(prod.get("name")));
+                            getUserData(token).put("selectedId",    prod.get("id"));
+                            getUserData(token).put("selectedName",  details.path("name").asText(prod.get("name")));
                             getUserData(token).put("selectedPrice", discount.finalPrice);
                             userState.put(token, STATE_ORDER_NAME);
                             sendAiSensyReply(phone, "Great! Let\u2019s place your order.\n\nPlease enter your *Full Name*:");
-                            return ok("ok");
                         } else {
                             sendAiSensyReply(phone, "Sorry, this product is currently *out of stock*.\n\nType 0 for Main Menu.");
-                            return ok("ok");
                         }
+                        return ok("ok");
                     }
                 }
-                // For categories or fallback: treat the suffix as an index number
-                text = idxStr;
+                // Treat suffix as a numeric index for non-product states
+                text  = idxStr;
                 input = idxStr;
             }
 
             // --- Global resets ---
             if (input.equals("0") || input.equals("hi") || input.equals("hello") || input.equals("menu")) {
-                reply = buildMenuMessage(token);
-                next = STATE_MENU;
-                userData.remove(token);
+                reply = buildMenuMessage();
+                next  = STATE_MENU;
+                resetUserDataPreservingAuth(token);
             } else {
                 // --- State machine ---
                 switch (state) {
@@ -244,7 +257,8 @@ public class WebhookController {
                     case STATE_MENU: {
                         if (input.equals("1")) {
                             reply = fetchCategories(phone, token);
-                            next = reply.contains("unavailable") ? STATE_MENU : STATE_CATEGORIES;
+                            next  = CAROUSEL_SENT.equals(reply) ? STATE_CATEGORIES
+                                    : (reply.contains("unavailable") ? STATE_MENU : STATE_CATEGORIES);
                         } else {
                             reply = "Please reply with a valid number (1).";
                         }
@@ -253,11 +267,11 @@ public class WebhookController {
 
                     case STATE_CATEGORIES: {
                         if (input.equals("9")) {
-                            reply = buildMenuMessage(token);
-                            next = STATE_MENU;
+                            reply = buildMenuMessage();
+                            next  = STATE_MENU;
                         } else {
                             reply = handleCategorySelection(phone, token, text);
-                            next = userState.getOrDefault(token, STATE_CATEGORIES);
+                            next  = userState.getOrDefault(token, STATE_CATEGORIES);
                         }
                         break;
                     }
@@ -265,10 +279,10 @@ public class WebhookController {
                     case STATE_SUBCATEGORIES: {
                         if (input.equals("9")) {
                             reply = fetchCategories(phone, token);
-                            next = STATE_CATEGORIES;
+                            next  = STATE_CATEGORIES;
                         } else {
                             reply = handleSubCategorySelection(phone, token, text);
-                            next = userState.getOrDefault(token, STATE_SUBCATEGORIES);
+                            next  = userState.getOrDefault(token, STATE_SUBCATEGORIES);
                         }
                         break;
                     }
@@ -281,18 +295,18 @@ public class WebhookController {
                                 JsonNode subList = resolveList(subData);
                                 if (subList != null && subList.size() > 0) {
                                     reply = buildSubCategoryResponse(token, subList);
-                                    next = STATE_SUBCATEGORIES;
+                                    next  = STATE_SUBCATEGORIES;
                                 } else {
                                     reply = fetchCategories(phone, token);
-                                    next = STATE_CATEGORIES;
+                                    next  = STATE_CATEGORIES;
                                 }
                             } else {
                                 reply = fetchCategories(phone, token);
-                                next = STATE_CATEGORIES;
+                                next  = STATE_CATEGORIES;
                             }
                         } else {
                             reply = handleProductSelection(token, text);
-                            next = userState.getOrDefault(token, STATE_PRODUCTS);
+                            next  = userState.getOrDefault(token, STATE_PRODUCTS);
                         }
                         break;
                     }
@@ -300,21 +314,18 @@ public class WebhookController {
                     case STATE_PRODUCT_DETAILS: {
                         if (input.equals("9")) {
                             String lastSlug = (String) getUserData(token).get("lastSlug");
-                            String lastName = (String) getUserData(token).get("lastCategoryName");
+                            String lastName  = (String) getUserData(token).get("lastCategoryName");
                             reply = fetchProducts(phone, token, lastSlug, lastName);
-                            next = STATE_PRODUCTS;
+                            next  = STATE_PRODUCTS;
                         } else if (input.equals("1")) {
-                            // Live stock re-check
                             String prodId = (String) getUserData(token).get("selectedId");
                             JsonNode details = bgsGet("/product/items/" + prodId);
-                            boolean inStock = isProductInStock(details);
-
-                            if (!inStock) {
+                            if (!isProductInStock(details)) {
                                 reply = "Sorry, this product is currently *out of stock*.\n\n"
                                         + "Type 9 for Previous Menu or 0 for Main Menu.";
                             } else {
                                 reply = "Great! Let's place your order.\n\nPlease enter your *Full Name*:";
-                                next = STATE_ORDER_NAME;
+                                next  = STATE_ORDER_NAME;
                             }
                         } else {
                             reply = "Please type 1 to Buy, 9 for Previous Menu, or 0 for Main Menu.";
@@ -325,13 +336,13 @@ public class WebhookController {
                     case STATE_ORDER_NAME: {
                         if (input.equals("9")) {
                             String lastSlug = (String) getUserData(token).get("lastSlug");
-                            String lastName = (String) getUserData(token).get("lastCategoryName");
+                            String lastName  = (String) getUserData(token).get("lastCategoryName");
                             reply = fetchProducts(phone, token, lastSlug, lastName);
-                            next = STATE_PRODUCTS;
+                            next  = STATE_PRODUCTS;
                         } else {
                             getUserData(token).put("orderName", text);
                             reply = "Got it!\n\nPlease enter your *6-digit Delivery Pincode*:";
-                            next = STATE_ORDER_PINCODE;
+                            next  = STATE_ORDER_PINCODE;
                         }
                         break;
                     }
@@ -339,15 +350,16 @@ public class WebhookController {
                     case STATE_ORDER_PINCODE: {
                         if (input.equals("9")) {
                             reply = "Please enter your *Full Name*:";
-                            next = STATE_ORDER_NAME;
+                            next  = STATE_ORDER_NAME;
                         } else if (!validationService.isPincodeValid(input)) {
                             reply = validationService.pincodeErrorMessage();
                         } else if (!validationService.isServiceable(input)) {
                             reply = validationService.serviceabilityErrorMessage(input);
                         } else {
                             getUserData(token).put("orderPincode", input);
-                            reply = "Pincode serviceable!\n\nNow please enter your *Full Delivery Address* (including house number, street, etc.):";
-                            next = STATE_ORDER_ADDRESS;
+                            reply = "Pincode serviceable!\n\nNow please enter your *Full Delivery Address* "
+                                    + "(including house number, street, etc.):";
+                            next  = STATE_ORDER_ADDRESS;
                         }
                         break;
                     }
@@ -355,7 +367,7 @@ public class WebhookController {
                     case STATE_ORDER_ADDRESS: {
                         if (input.equals("9")) {
                             reply = "Please enter your *6-digit Delivery Pincode*:";
-                            next = STATE_ORDER_PINCODE;
+                            next  = STATE_ORDER_PINCODE;
                         } else if (!validationService.isAddressValid(text)) {
                             reply = validationService.addressErrorMessage();
                         } else {
@@ -365,15 +377,16 @@ public class WebhookController {
                                     + "2. UPI Payment\n"
                                     + "3. Online (Card / Net Banking)\n\n"
                                     + "_Please reply with 1, 2, or 3._";
-                            next = STATE_ORDER_PAYMENT;
+                            next  = STATE_ORDER_PAYMENT;
                         }
                         break;
                     }
 
                     case STATE_ORDER_PAYMENT: {
                         if (input.equals("9")) {
-                            reply = "Now please enter your *Full Delivery Address* (including house number, street, etc.):";
-                            next = STATE_ORDER_ADDRESS;
+                            reply = "Now please enter your *Full Delivery Address* "
+                                    + "(including house number, street, etc.):";
+                            next  = STATE_ORDER_ADDRESS;
                         } else {
                             String method = resolvePaymentMethod(input);
                             if (method == null) {
@@ -381,7 +394,7 @@ public class WebhookController {
                             } else {
                                 getUserData(token).put("paymentMethod", method);
                                 reply = buildOrderSummary(token);
-                                next = STATE_ORDER_CONFIRM;
+                                next  = STATE_ORDER_CONFIRM;
                             }
                         }
                         break;
@@ -394,20 +407,21 @@ public class WebhookController {
                                     + "2. UPI Payment\n"
                                     + "3. Online (Card / Net Banking)\n\n"
                                     + "_Please reply with 1, 2, or 3._";
-                            next = STATE_ORDER_PAYMENT;
+                            next  = STATE_ORDER_PAYMENT;
                         } else if (input.equals("1")) {
-                            reply = processFinalOrder(phone, token);
-                            next = reply.contains("could not be generated") ? STATE_ORDER_PAYMENT : STATE_MENU;
+                            OrderPlacementResult result = processFinalOrder(phone, token);
+                            reply = result.message;
+                            next  = result.success ? STATE_MENU : STATE_ORDER_PAYMENT;
                         } else {
-                            reply = "Please type 1 to confirm the order, 9 to go back, or 0 to cancel and return to main menu.";
+                            reply = "Please type 1 to confirm the order, 9 to go back, or 0 to cancel.";
                         }
                         break;
                     }
 
                     default: {
-                        reply = buildMenuMessage(token);
-                        next = STATE_MENU;
-                        userData.remove(token);
+                        reply = buildMenuMessage();
+                        next  = STATE_MENU;
+                        resetUserDataPreservingAuth(token);
                     }
                 }
             }
@@ -419,100 +433,121 @@ public class WebhookController {
             return ok("ok");
 
         } catch (Exception e) {
-            log.error("[Error] {}", e.getMessage(), e);
+            log.error("[Webhook] Unhandled exception in receiveMessage: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("status", "error", "message", e.getMessage()));
+                    .body(Map.of("status", "error", "message", "Internal server error"));
         }
     }
 
-    // ==========================================================================
-    // ORDER PLACEMENT LOGIC
-    // ==========================================================================
+    // =========================================================================
+    // ORDER PLACEMENT
+    // =========================================================================
 
-    private String processFinalOrder(String phone, String token) {
+    /**
+     * Wraps the result of processFinalOrder so STATE_ORDER_CONFIRM can branch
+     * cleanly without brittle string-contains checks.
+     */
+    private static class OrderPlacementResult {
+        final boolean success;
+        final String  message;
+        OrderPlacementResult(boolean success, String message) {
+            this.success = success;
+            this.message = message;
+        }
+    }
+
+    private OrderPlacementResult processFinalOrder(String phone, String token) {
         Map<String, Object> d = getUserData(token);
-        String prodId = (String) d.get("selectedId");
-        String prodName = (String) d.get("selectedName");
+        String prodId    = (String) d.get("selectedId");
+        String prodName  = (String) d.get("selectedName");
         String finalPrice = (String) d.get("selectedPrice");
-        String name = (String) d.get("orderName");
-        String address = (String) d.get("orderAddress");
-        String pincode = (String) d.get("orderPincode");
-        String payment = (String) d.get("paymentMethod");
+        String name      = (String) d.get("orderName");
+        String address   = (String) d.get("orderAddress");
+        String pincode   = (String) d.get("orderPincode");
+        String payment   = (String) d.get("paymentMethod");
         String authToken = (String) d.get("authToken");
-        
+
         if (authToken == null) {
-            log.error("Cannot process order for {}: Missing BGS auth token.", phone);
-            return "Oops! We could not verify your account with our backend. Please type 0 to start over.";
+            log.error("[Order] Cannot process order for {}: Missing BGS auth token.", phone);
+            return new OrderPlacementResult(false,
+                    "Oops! We could not verify your account. Please type 0 to start over.");
         }
 
-        // 1. Re‑validate Stock (CRITICAL)
+        // 1. Re-validate stock (CRITICAL — price/availability can change between browse and confirm)
         JsonNode details = bgsGet("/product/items/" + prodId);
         if (!isProductInStock(details)) {
-            return "We're sorry, but this product just went *out of stock*.\nYour order could not be placed. Type 0 for Main Menu to view other products.";
+            return new OrderPlacementResult(false,
+                    "We're sorry, but this product just went *out of stock*.\n"
+                            + "Your order could not be placed. Type 0 for Main Menu.");
         }
 
-        // 2. Create Order in Backend
+        // 2. Create Order
+        log.info("[Order] Placing order for phone={}, product='{}' ({}), price={}, payment={}",
+                phone, prodName, prodId, finalPrice, payment);
+
         OrderService.OrderResult orderRes = orderService.createOrder(
                 phone, prodId, prodName, finalPrice, name, address, pincode, payment, authToken);
 
         if (!orderRes.success) {
-            log.error("Order creation failed for {}: {}", phone, orderRes.errorMessage);
-            // Clear the token so it gets refreshed on the next interaction if it was an auth issue
+            log.error("[Order] Creation failed for phone={}: {}", phone, orderRes.errorMessage);
+            // Clear auth token to force refresh on next interaction
             getUserData(token).remove("authToken");
-            return "Oops! Something went wrong while creating your order. Please try again later or contact support.";
+            return new OrderPlacementResult(false,
+                    "Oops! Something went wrong while creating your order. Please try again later.");
         }
 
         String orderId = orderRes.orderId;
+        log.info("[Order] ✅ Order created. ID={}, phone={}, product='{}', price={}, payment={}",
+                orderId, phone, prodName, finalPrice, payment);
+
         StringBuilder msg = new StringBuilder();
         msg.append("*Order Placed Successfully!*\n\n")
                 .append("Order ID : #").append(orderId).append("\n")
                 .append("Thank you for shopping with *YotMart*!\n");
 
-        // 3. Generate Payment Link if not COD
+        // 3. Generate payment link if not COD
         if (!"COD".equals(payment)) {
-            PaymentService.PaymentResult payRes = paymentService.generatePaymentLink(
-                    orderId, phone, finalPrice, payment, authToken);
+            PaymentService.PaymentResult payRes =
+                    paymentService.generatePaymentLink(orderId, phone, finalPrice, payment, authToken);
 
             if (payRes.success) {
                 msg.append("\n\n*Please complete your payment here:*\n").append(payRes.paymentLink);
+                log.info("[Order] Payment link generated for order {}: {}", orderId, payRes.paymentLink);
             } else {
-                // Payment link generation failed – keep user in payment step to re‑choose
-                log.warn("Payment link generation failed for order {}: {}", orderId, payRes.errorMessage);
-                // Reset state so the user can pick another method
+                // Payment link failed — let user choose another method
+                log.warn("[Order] Payment link failed for order {}: {}", orderId, payRes.errorMessage);
                 userState.put(token, STATE_ORDER_PAYMENT);
-                return "Order created, but *Payment link could not be generated*: " + payRes.errorMessage
-                        + "\n\nPlease reply with:\n1. COD (Cash on Delivery)\n2. UPI Payment\n3. Online (Card / Net Banking)\n\n_Enter 1, 2, or 3._";
+                return new OrderPlacementResult(false,
+                        "Order created, but *Payment link could not be generated*: " + payRes.errorMessage
+                                + "\n\nPlease reply with:\n1. COD\n2. UPI\n3. Online\n\n_Enter 1, 2, or 3._");
             }
         }
 
-        // Cleanup session data
-        userData.remove(token);
-        return msg.toString();
+        // Cleanup order-flow data (preserve authToken for future interactions)
+        resetUserDataPreservingAuth(token);
+        return new OrderPlacementResult(true, msg.toString());
     }
 
-    // ==========================================================================
-    // BGS API HELPER METHODS
-    // ==========================================================================
+    // =========================================================================
+    // BGS API HELPER
+    // =========================================================================
 
     private JsonNode bgsGet(String path) {
         try {
             return bgsApiClient.get(path);
         } catch (Exception e) {
+            log.error("[BGS] GET {} failed: {}", path, e.getMessage());
             return null;
         }
     }
 
-    // --- Fetch & format categories ------------------------------------------
-    private void clearUserData(String token) {
-        userData.remove(token);
-        userState.remove(token);
-    }
+    // =========================================================================
+    // CATEGORY FLOW
+    // =========================================================================
 
-    // --- Fetch & format categories ------------------------------------------
     private String fetchCategories(String phone, String token) {
         JsonNode data = bgsGet("/product/categories");
-        if (data == null)
-            return "Service temporarily unavailable. Please try again later.";
+        if (data == null) return "Service temporarily unavailable. Please try again later.";
 
         JsonNode list = resolveList(data);
         if (list == null || !list.isArray() || list.size() == 0) {
@@ -522,25 +557,30 @@ public class WebhookController {
         StringBuilder sb = new StringBuilder("*Available Categories:*\n\n");
         List<Map<String, String>> cats = new ArrayList<>();
         List<Map<String, Object>> carouselCards = new ArrayList<>();
-        int max = Math.min(list.size(), 10); // WhatsApp carousel limit
-
         List<String[]> cardMeta = new ArrayList<>(); // [name, label, imageUrl]
+
+        int max = Math.min(list.size(), 10);
         for (int i = 0; i < max; i++) {
             JsonNode cat = list.get(i);
-            String name = cat.path("name").asText("Category " + (i + 1));
-            String id = cat.path("_id").asText(cat.path("id").asText(""));
-            String slug = cat.path("seo").path("slug").asText(cat.path("slug").asText(""));
-            String imageUrl = extractImageUrl(cat, name);
+            try {
+                String name     = cat.path("name").asText("Category " + (i + 1));
+                String id       = cat.path("_id").asText(cat.path("id").asText(""));
+                String slug     = cat.path("seo").path("slug").asText(cat.path("slug").asText(""));
+                String imageUrl = extractImageUrl(cat, name);
 
-            sb.append((i + 1)).append(". ").append(name).append("\n");
-            cats.add(Map.of("index", String.valueOf(i + 1), "id", id, "slug", slug, "name", name));
+                sb.append((i + 1)).append(". ").append(name).append("\n");
+                cats.add(Map.of("index", String.valueOf(i + 1), "id", id, "slug", slug, "name", name));
 
-            if (isValidImageUrl(imageUrl)) {
-                carouselCards.add(buildCarouselCard(imageUrl, name, "Browse Collection", String.valueOf(i + 1)));
-                cardMeta.add(new String[]{name, "Browse Collection", imageUrl});
-            } else {
-                log.warn("[Carousel][Category] Skipping card for '{}' - missing/invalid image URL", name);
-                cardMeta.add(new String[]{name, "Browse Collection", "MISSING"});
+                if (isValidImageUrl(imageUrl)) {
+                    carouselCards.add(buildCarouselCard(imageUrl, name, "Browse Collection", String.valueOf(i + 1)));
+                    cardMeta.add(new String[]{name, "Browse Collection", imageUrl});
+                } else {
+                    log.warn("[Carousel][Category] No valid image for '{}' — card skipped", name);
+                    cardMeta.add(new String[]{name, "Browse Collection", "MISSING"});
+                }
+            } catch (Exception e) {
+                log.error("[Carousel][Category] Error processing category at index {}: {}", i, e.getMessage(), e);
+                // Continue to next category — do not abort the entire list
             }
         }
         sb.append("\n9. Previous Menu\n0. Main Menu\n\n_Please reply with a number._");
@@ -548,31 +588,28 @@ public class WebhookController {
         try {
             getUserData(token).put("categoriesJson", objectMapper.writeValueAsString(cats));
         } catch (Exception e) {
-            log.error("[Carousel] Failed to serialize categoriesJson: {}", e.getMessage());
+            log.error("[Category] Failed to serialize categoriesJson: {}", e.getMessage());
         }
         userState.put(token, STATE_CATEGORIES);
 
-        // Attempt carousel; fall back to text listing on failure or no valid images
         if (carouselDebug) logCarouselDebugSummary("Category", cardMeta);
-        // Extract first valid card's name + label for body {{1}} and {{2}}
-        String firstValidCat = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[0]).orElse("Products");
-        String firstLabelCat = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[1]).orElse("Browse Collection");
-        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidCat, firstLabelCat)) {
+
+        String firstValidName  = firstValidCardMeta(cardMeta, 0, "Products");
+        String firstValidLabel = firstValidCardMeta(cardMeta, 1, "Browse Collection");
+
+        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidName, firstValidLabel)) {
             return CAROUSEL_SENT;
         }
-        log.info("[Carousel][Category] Falling back to text listing for {}", phone);
+        log.info("[Carousel][Category] Falling back to text listing for phone={}", phone);
         return sb.toString();
     }
 
-    // --- Handle category selection -----------------------------------------
     private String handleCategorySelection(String phone, String token, String text) {
         List<Map<String, String>> cats = getListFromState(token, "categoriesJson");
-        if (cats == null)
-            return "Session expired. Type 0 to start over.";
+        if (cats == null) return "Session expired. Type 0 to start over.";
 
         Map<String, String> cat = matchByIndex(cats, text);
-        if (cat == null)
-            return "Please reply with a valid number from the list above.";
+        if (cat == null) return "Please reply with a valid number from the list above.";
 
         getUserData(token).put("lastCategoryId", cat.get("id"));
 
@@ -585,7 +622,10 @@ public class WebhookController {
         return fetchProducts(phone, token, cat.get("slug"), cat.get("name"));
     }
 
-    // --- Fetch & format sub-categories --------------------------------------
+    // =========================================================================
+    // SUBCATEGORY FLOW
+    // =========================================================================
+
     private String buildSubCategoryResponse(String token, JsonNode list) {
         StringBuilder sb = new StringBuilder("*Sub-categories:*\n\n");
         List<Map<String, String>> subs = new ArrayList<>();
@@ -594,7 +634,7 @@ public class WebhookController {
         for (int i = 0; i < max; i++) {
             JsonNode s = list.get(i);
             String name = s.path("name").asText("Sub " + (i + 1));
-            String id = s.path("_id").asText(s.path("id").asText(""));
+            String id   = s.path("_id").asText(s.path("id").asText(""));
             String slug = s.path("seo").path("slug").asText(s.path("slug").asText(""));
             sb.append((i + 1)).append(". ").append(name).append("\n");
             subs.add(Map.of("index", String.valueOf(i + 1), "id", id, "slug", slug, "name", name));
@@ -603,27 +643,34 @@ public class WebhookController {
 
         try {
             getUserData(token).put("subCatsJson", objectMapper.writeValueAsString(subs));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.error("[SubCategory] Failed to serialize subCatsJson: {}", e.getMessage());
         }
         userState.put(token, STATE_SUBCATEGORIES);
         return sb.toString();
     }
 
-    // --- Handle sub-category selection ---------------------------------------
     private String handleSubCategorySelection(String phone, String token, String text) {
         List<Map<String, String>> subs = getListFromState(token, "subCatsJson");
-        if (subs == null)
-            return "Session expired. Type 0 to start over.";
+        if (subs == null) return "Session expired. Type 0 to start over.";
 
         Map<String, String> sub = matchByIndex(subs, text);
-        if (sub == null)
-            return "Please reply with a valid number from the list above.";
+        if (sub == null) return "Please reply with a valid number from the list above.";
 
         return fetchProducts(phone, token, sub.get("slug"), sub.get("name"));
     }
 
-    // --- Fetch & format product list -----------------------------------------
+    // =========================================================================
+    // PRODUCT FLOW
+    // =========================================================================
+
     private String fetchProducts(String phone, String token, String slug, String categoryName) {
+        // Guard against null/blank slug to prevent garbage API calls
+        if (slug == null || slug.isBlank()) {
+            log.warn("[Products] Cannot fetch products — slug is null/blank for category '{}'", categoryName);
+            return "Could not load products for *" + categoryName + "*. Please try again.\n\n0. Main Menu";
+        }
+
         getUserData(token).put("lastSlug", slug);
         getUserData(token).put("lastCategoryName", categoryName);
 
@@ -637,36 +684,43 @@ public class WebhookController {
         StringBuilder sb = new StringBuilder("*Products in " + categoryName + ":*\n\n");
         List<Map<String, String>> prods = new ArrayList<>();
         List<Map<String, Object>> carouselCards = new ArrayList<>();
-        int max = Math.min(list.size(), 10); // WhatsApp carousel limit
-
         List<String[]> cardMeta = new ArrayList<>(); // [name, price, imageUrl]
+
+        int max = Math.min(list.size(), 10);
         for (int i = 0; i < max; i++) {
             JsonNode p = list.get(i);
-            String name = p.path("name").asText("Product " + (i + 1));
-            String id = p.path("_id").asText(p.path("id").asText(""));
-            boolean inSt = isProductInStock(p);
-            int stockAmt = p.path("totalStock").asInt(p.path("stock").asInt(p.path("quantity").asInt(0)));
-            String imageUrl = extractImageUrl(p, name);
+            try {
+                String name     = p.path("name").asText("Product " + (i + 1));
+                String id       = p.path("_id").asText(p.path("id").asText(""));
+                boolean inSt    = isProductInStock(p);
+                int stockAmt    = p.path("totalStock").asInt(p.path("stock").asInt(p.path("quantity").asInt(0)));
+                String imageUrl = extractImageUrl(p, name);
 
-            OfferService.DiscountResult discount = offerService.applyBestOffer(p);
-            String priceText = "\u20b9" + discount.finalPrice;
+                OfferService.DiscountResult discount = offerService.applyBestOffer(p);
+                String priceText = "\u20b9" + discount.finalPrice;
 
-            String stockLine = inSt
-                    ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock")
-                    : "Out of Stock";
+                String stockLine = inSt
+                        ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock")
+                        : "Out of Stock";
 
-            sb.append((i + 1)).append(". *").append(name).append("*\n")
-                    .append("   ").append(discount.toWhatsAppLine()).append("\n")
-                    .append("   Stock: ").append(stockLine).append("\n\n");
+                sb.append((i + 1)).append(". *").append(name).append("*\n")
+                        .append("   ").append(discount.toWhatsAppLine()).append("\n")
+                        .append("   Stock: ").append(stockLine).append("\n\n");
 
-            prods.add(Map.of("index", String.valueOf(i + 1), "id", id, "name", name));
+                prods.add(Map.of("index", String.valueOf(i + 1), "id", id, "name", name));
 
-            if (isValidImageUrl(imageUrl)) {
-                carouselCards.add(buildCarouselCard(imageUrl, name, priceText, String.valueOf(i + 1)));
-                cardMeta.add(new String[]{name, priceText, imageUrl});
-            } else {
-                log.warn("[Carousel][Product] Skipping card for '{}' - missing/invalid image URL", name);
-                cardMeta.add(new String[]{name, priceText, "MISSING"});
+                if (isValidImageUrl(imageUrl)) {
+                    carouselCards.add(buildCarouselCard(imageUrl, name, priceText, String.valueOf(i + 1)));
+                    cardMeta.add(new String[]{name, priceText, imageUrl});
+                    log.debug("[Carousel][Product] Card {}: name='{}', price={}, image={}",
+                            i + 1, name, priceText, imageUrl);
+                } else {
+                    log.warn("[Carousel][Product] No valid image for '{}' (index {}) — card skipped", name, i + 1);
+                    cardMeta.add(new String[]{name, priceText, "MISSING"});
+                }
+            } catch (Exception e) {
+                log.error("[Carousel][Product] Error processing product at index {}: {}", i, e.getMessage(), e);
+                // Continue to next product — do not abort the entire list
             }
         }
         sb.append("9. Previous Menu\n0. Main Menu\n\n_Please reply with a number to view product details._");
@@ -674,47 +728,42 @@ public class WebhookController {
         try {
             getUserData(token).put("productsJson", objectMapper.writeValueAsString(prods));
         } catch (Exception e) {
-            log.error("[Carousel] Failed to serialize productsJson: {}", e.getMessage());
+            log.error("[Products] Failed to serialize productsJson: {}", e.getMessage());
         }
         userState.put(token, STATE_PRODUCTS);
 
-        // Attempt carousel; fall back to text listing on failure or no valid images
         if (carouselDebug) logCarouselDebugSummary("Product", cardMeta);
-        // Pass first card's name + price as global body {{1}} and {{2}}
-        String firstValidProd = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[0]).orElse("Product");
-        String firstPriceProd = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).findFirst().map(m -> m[1]).orElse("Check price");
-        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidProd, firstPriceProd)) {
+
+        String firstValidName  = firstValidCardMeta(cardMeta, 0, "Product");
+        String firstValidPrice = firstValidCardMeta(cardMeta, 1, "Check price");
+
+        if (!carouselCards.isEmpty() && sendCarouselReply(phone, carouselCards, firstValidName, firstValidPrice)) {
             return CAROUSEL_SENT;
         }
-        log.info("[Carousel][Product] Falling back to text listing for {}", phone);
+        log.info("[Carousel][Product] Falling back to text listing for phone={}", phone);
         return sb.toString();
     }
 
-    // --- Handle product selection ---------------------------------------------
     private String handleProductSelection(String token, String text) {
         List<Map<String, String>> prods = getListFromState(token, "productsJson");
-        if (prods == null)
-            return "Session expired. Type 0 to start over.";
+        if (prods == null) return "Session expired. Type 0 to start over.";
 
         Map<String, String> prod = matchByIndex(prods, text);
-        if (prod == null)
-            return "Please reply with a valid number from the list above.";
+        if (prod == null) return "Please reply with a valid number from the list above.";
 
         JsonNode details = bgsGet("/product/items/" + prod.get("id"));
-        if (details == null)
-            return "Could not fetch product details. Please try again.";
+        if (details == null) return "Could not fetch product details. Please try again.";
 
-        String name = details.path("name").asText(prod.get("name"));
-        boolean inSt = isProductInStock(details);
-        int stockAmt = details.path("totalStock").asInt(details.path("stock").asInt(details.path("quantity").asInt(0)));
+        String name     = details.path("name").asText(prod.get("name"));
+        boolean inSt    = isProductInStock(details);
+        int stockAmt    = details.path("totalStock").asInt(details.path("stock").asInt(details.path("quantity").asInt(0)));
+        String desc     = details.path("description").asText("").replaceAll("<[^>]*>", "");
+        if (desc.length() > 250) desc = desc.substring(0, 250) + "...";
+
         OfferService.DiscountResult discount = offerService.applyBestOffer(details);
 
-        String desc = details.path("description").asText("").replaceAll("<[^>]*>", "");
-        if (desc.length() > 250)
-            desc = desc.substring(0, 250) + "...";
-
-        getUserData(token).put("selectedId", prod.get("id"));
-        getUserData(token).put("selectedName", name);
+        getUserData(token).put("selectedId",    prod.get("id"));
+        getUserData(token).put("selectedName",  name);
         getUserData(token).put("selectedPrice", discount.finalPrice);
         userState.put(token, STATE_PRODUCT_DETAILS);
 
@@ -722,6 +771,8 @@ public class WebhookController {
                 ? (stockAmt > 0 && stockAmt <= 5 ? "In Stock (Only " + stockAmt + " left!)" : "In Stock")
                 : "Out of Stock";
         String buyPrompt = inSt ? "1. Buy Now\n" : "_This product is currently out of stock._\n";
+
+        log.info("[ProductDetails] name='{}', price={}, stock={}", name, discount.finalPrice, stockLine);
 
         return "*" + name + "*\n\n"
                 + discount.toWhatsAppLine() + "\n"
@@ -733,92 +784,174 @@ public class WebhookController {
                 + "_Please reply with a number._";
     }
 
-    // --- Build order summary --------------------------------------------------
+    // =========================================================================
+    // ORDER SUMMARY
+    // =========================================================================
+
     private String buildOrderSummary(String token) {
         Map<String, Object> d = getUserData(token);
-        String name = (String) d.getOrDefault("orderName", "N/A");
+        String name    = (String) d.getOrDefault("orderName",    "N/A");
         String address = (String) d.getOrDefault("orderAddress", "N/A");
         String pincode = (String) d.getOrDefault("orderPincode", "N/A");
-        String payment = (String) d.getOrDefault("paymentMethod", "N/A");
+        String payment = (String) d.getOrDefault("paymentMethod","N/A");
         String product = (String) d.getOrDefault("selectedName", "N/A");
-        String price = (String) d.getOrDefault("selectedPrice", "N/A");
+        String price   = (String) d.getOrDefault("selectedPrice","N/A");
 
         return "*Order Summary*\n\n"
-                + "Product: " + product + "\n"
-                + "Name: " + name + "\n"
-                + "Address: " + address + ", " + pincode + "\n"
-                + "Payment: " + payment + "\n"
-                + "Total: ₹" + price + "\n\n"
+                + "Product: "  + product + "\n"
+                + "Name: "     + name    + "\n"
+                + "Address: "  + address + ", " + pincode + "\n"
+                + "Payment: "  + payment + "\n"
+                + "Total: \u20b9" + price + "\n\n"
                 + "1. Confirm Order\n"
                 + "9. Previous Step\n"
                 + "0. Cancel & Main Menu\n\n"
                 + "_Please reply with 1, 9, or 0._";
     }
 
-    // --- Build welcome/menu message -------------------------------------------
-    private String buildMenuMessage(String token) {
+    // =========================================================================
+    // MENU
+    // =========================================================================
+
+    private String buildMenuMessage() {
         return "Welcome to *YotMart*!\n\nWhat would you like to do?\n\n"
                 + "1. Browse Products\n\n"
                 + "_Please reply with 1._";
     }
 
-    // ==========================================================================
+    // =========================================================================
     // CAROUSEL HELPERS
-    // ==========================================================================
+    // =========================================================================
 
     /**
-     * Searches the JSON node for a valid image URL, logging each field check when debug is enabled.
-     * Priority: image -> imageUrl -> thumbnail -> featuredImage -> bannerImage -> media[0] -> gallery[0]
+     * Extracts the highest-quality valid image URL from a BGS API response node.
+     *
+     * Checks all known image field names and nested quality sub-fields.
+     * Priority for nested objects: original → md → sm → xs
+     *
+     * Checked field families (in order):
+     *   1.  image            (string or nested object with xs/sm/md/original)
+     *   2.  imageUrl         (string)
+     *   3.  thumbnail        (string or nested object)
+     *   4.  thumbnails       (object with xs/sm/md/original)
+     *   5.  featuredImage    (string)
+     *   6.  bannerImage      (string)
+     *   7.  media            (array of strings or objects with url field)
+     *   8.  gallery          (array of strings or objects with url field)
+     *
+     * @param node     the JSON node to inspect
+     * @param itemName the name of the product/category (for logging)
+     * @return the highest-quality valid image URL, or null if none found
      */
-    private String extractImageUrl(JsonNode node) {
-        return extractImageUrl(node, null);
-    }
-
     private String extractImageUrl(JsonNode node, String itemName) {
         if (node == null) return null;
-        String[] fields = {"image", "imageUrl", "thumbnail", "featuredImage", "bannerImage"};
-        for (String field : fields) {
-            JsonNode fieldNode = node.path(field);
-            String val = fieldNode.asText("").trim();
-            if (val.isEmpty() || val.equals("null")) {
-                if (carouselDebug && itemName != null)
-                    log.debug("[ImageExtract] '{}': field '{}' is null/empty - skipping", itemName, field);
-                continue;
-            }
-            if (isValidImageUrl(val)) {
-                if (carouselDebug && itemName != null)
-                    log.info("[ImageExtract] '{}': found valid URL in field '{}': {}", itemName, field, val);
-                return val;
-            } else {
-                log.warn("[ImageExtract] '{}': field '{}' has value '{}' but failed URL validation (must start with http/https)",
-                        itemName != null ? itemName : "unknown", field, val);
+        String label = (itemName != null) ? itemName : "unknown";
+
+        // ── 1. image — may be a plain string or nested object ──────────────
+        JsonNode imageNode = node.path("image");
+        if (!imageNode.isMissingNode()) {
+            if (imageNode.isTextual()) {
+                String url = imageNode.asText("").trim();
+                if (isValidImageUrl(url)) {
+                    logImageFound(label, "image", url);
+                    return url;
+                }
+            } else if (imageNode.isObject()) {
+                String url = bestQualityFromObject(imageNode, label, "image");
+                if (url != null) return url;
             }
         }
-        // Check media array
-        JsonNode media = node.path("media");
-        if (media.isArray() && media.size() > 0) {
-            JsonNode first = media.get(0);
-            String url = first.isTextual() ? first.asText("") : first.path("url").asText("");
-            if (isValidImageUrl(url)) {
-                if (carouselDebug && itemName != null)
-                    log.info("[ImageExtract] '{}': found valid URL in field 'media[0]': {}", itemName, url);
-                return url;
+
+        // ── 2. imageUrl ────────────────────────────────────────────────────
+        {
+            String url = node.path("imageUrl").asText("").trim();
+            if (isValidImageUrl(url)) { logImageFound(label, "imageUrl", url); return url; }
+        }
+
+        // ── 3. thumbnail — may be a plain string or nested object ──────────
+        JsonNode thumbNode = node.path("thumbnail");
+        if (!thumbNode.isMissingNode()) {
+            if (thumbNode.isTextual()) {
+                String url = thumbNode.asText("").trim();
+                if (isValidImageUrl(url)) { logImageFound(label, "thumbnail", url); return url; }
+            } else if (thumbNode.isObject()) {
+                String url = bestQualityFromObject(thumbNode, label, "thumbnail");
+                if (url != null) return url;
             }
         }
-        // Check gallery array
-        JsonNode gallery = node.path("gallery");
-        if (gallery.isArray() && gallery.size() > 0) {
-            JsonNode first = gallery.get(0);
-            String url = first.isTextual() ? first.asText("") : first.path("url").asText("");
-            if (isValidImageUrl(url)) {
-                if (carouselDebug && itemName != null)
-                    log.info("[ImageExtract] '{}': found valid URL in field 'gallery[0]': {}", itemName, url);
-                return url;
-            }
+
+        // ── 4. thumbnails — object with xs/sm/md/original sub-fields ───────
+        JsonNode thumbsNode = node.path("thumbnails");
+        if (!thumbsNode.isMissingNode() && thumbsNode.isObject()) {
+            String url = bestQualityFromObject(thumbsNode, label, "thumbnails");
+            if (url != null) return url;
         }
-        log.warn("[ImageExtract] '{}': no valid image URL found. Checked all 7 fields (image, imageUrl, thumbnail, featuredImage, bannerImage, media[0], gallery[0])",
-                itemName != null ? itemName : "unknown");
+
+        // ── 5. featuredImage ───────────────────────────────────────────────
+        {
+            String url = node.path("featuredImage").asText("").trim();
+            if (isValidImageUrl(url)) { logImageFound(label, "featuredImage", url); return url; }
+        }
+
+        // ── 6. bannerImage ─────────────────────────────────────────────────
+        {
+            String url = node.path("bannerImage").asText("").trim();
+            if (isValidImageUrl(url)) { logImageFound(label, "bannerImage", url); return url; }
+        }
+
+        // ── 7. media (array) ───────────────────────────────────────────────
+        String mediaUrl = firstValidFromArray(node.path("media"), label, "media");
+        if (mediaUrl != null) return mediaUrl;
+
+        // ── 8. gallery (array) ─────────────────────────────────────────────
+        String galleryUrl = firstValidFromArray(node.path("gallery"), label, "gallery");
+        if (galleryUrl != null) return galleryUrl;
+
+        log.warn("[ImageExtract] '{}': no valid image URL found in any of the 8 field families "
+                + "(image, imageUrl, thumbnail, thumbnails, featuredImage, bannerImage, media, gallery)", label);
         return null;
+    }
+
+    /**
+     * Picks the highest-quality URL from a nested image object.
+     * Quality preference: original → md → sm → xs → url → src
+     */
+    private String bestQualityFromObject(JsonNode obj, String label, String fieldName) {
+        for (String quality : new String[]{"original", "md", "sm", "xs", "url", "src"}) {
+            JsonNode qNode = obj.path(quality);
+            if (qNode.isMissingNode()) continue;
+            String url = qNode.isTextual() ? qNode.asText("").trim() : qNode.path("url").asText("").trim();
+            if (isValidImageUrl(url)) {
+                logImageFound(label, fieldName + "." + quality, url);
+                return url;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns the first valid image URL from a JSON array.
+     * Each element may be a plain string or an object with a "url" field.
+     */
+    private String firstValidFromArray(JsonNode array, String label, String fieldName) {
+        if (!array.isArray() || array.size() == 0) return null;
+        for (int i = 0; i < array.size(); i++) {
+            JsonNode elem = array.get(i);
+            String url = elem.isTextual() ? elem.asText("").trim() : elem.path("url").asText("").trim();
+            if (isValidImageUrl(url)) {
+                logImageFound(label, fieldName + "[" + i + "]", url);
+                return url;
+            }
+        }
+        return null;
+    }
+
+    private void logImageFound(String label, String field, String url) {
+        if (carouselDebug) {
+            log.info("[ImageExtract] '{}': found valid URL in field '{}': {}", label, field, url);
+        } else {
+            log.debug("[ImageExtract] '{}': found valid URL in field '{}': {}", label, field, url);
+        }
     }
 
     /** Returns true only for non-blank http/https URLs. */
@@ -828,10 +961,11 @@ public class WebhookController {
     }
 
     /**
-     * Builds a single AiSensy carousel card.
-     * {{1}} = param1 (name), {{2}} = param2 (price / label)
-     * Button 0 payload = index  ("View Details" → routes into existing state machine as typed number)
-     * Button 1 payload = ORDER_<index>  ("Order Now" → intercepted before state machine)
+     * Builds a single AiSensy carousel card for the yotindia_carousel template.
+     * Header  → image
+     * Body    → {{1}} = param1 (name), {{2}} = param2 (price / label)
+     * Button 0 payload → index        (routes into state machine as typed number)
+     * Button 1 payload → ORDER_<index> (intercepted before state machine)
      */
     private Map<String, Object> buildCarouselCard(
             String imageUrl, String param1, String param2, String index) {
@@ -869,30 +1003,25 @@ public class WebhookController {
     }
 
     /**
-     * Logs a human-readable pre-send carousel summary, then POSTs the yotindia_carousel
-     * template to AiSensy. Returns true on HTTP 2xx; false on any error.
-     */
-    /**
      * Sends the yotindia_carousel template to AiSensy.
-     * bodyParam1 = {{1}} in the template body (e.g. first card name)
-     * bodyParam2 = {{2}} in the template body (e.g. first card price/label)
-     * These MUST be non-empty — Meta counts blank strings as 0 localizable_params (#132000).
+     *
+     * bodyParam1 = {{1}} in the template body (first card name)
+     * bodyParam2 = {{2}} in the template body (first card price/label)
+     * These MUST be non-empty — Meta rejects blank strings as 0 localizable_params.
+     *
+     * @return true on HTTP 2xx, false on any error
      */
     private boolean sendCarouselReply(String phone, List<Map<String, Object>> cards,
                                       String bodyParam1, String bodyParam2) {
         if (cards == null || cards.isEmpty()) return false;
-        // Ensure params are never blank — Meta rejects empty string as "no param"
+
+        // Ensure params are never blank
         String p1 = (bodyParam1 != null && !bodyParam1.isBlank()) ? bodyParam1 : "Products";
         String p2 = (bodyParam2 != null && !bodyParam2.isBlank()) ? bodyParam2 : "Shop now";
+
         try {
-            String url = "https://apis.aisensy.com/project-apis/v1/project/"
-                    + appProperties.getAisensy().getProjectId() + "/messages";
+            Map<String, Object> langMap = Map.of("code", "en");
 
-            Map<String, Object> langMap = new HashMap<>();
-            langMap.put("code", "en");
-
-            // Global body component: provides values for {{1}} and {{2}} in the template bubble.
-            // Must use REAL non-empty text — Meta rejects empty strings as 0 localizable_params.
             Map<String, Object> bodyComp = new HashMap<>();
             bodyComp.put("type", "body");
             bodyComp.put("parameters", List.of(
@@ -915,54 +1044,84 @@ public class WebhookController {
             payload.put("recipient_type", "individual");
             payload.put("template", template);
 
-            // --- Debug: log the full JSON payload before sending ---
             if (carouselDebug) {
                 try {
-                    String payloadJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
-                    log.info("[AiSensy Carousel] Sending to {} cards={} endpoint={}\nPayload:\n{}",
-                            phone, cards.size(), url, payloadJson);
+                    log.info("[AiSensy Carousel] Sending to={} cards={} template=yotindia_carousel\nPayload:\n{}",
+                            phone, cards.size(),
+                            objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload));
                 } catch (Exception ex) {
                     log.warn("[AiSensy Carousel] Could not serialize payload for debug logging: {}", ex.getMessage());
                 }
             }
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("X-AiSensy-Project-API-Pwd", appProperties.getAisensy().getApiKey());
-
             ResponseEntity<String> resp = restTemplate.postForEntity(
-                    url, new HttpEntity<>(payload, headers), String.class);
+                    buildAiSensyUrl(), new HttpEntity<>(payload, buildAiSensyHeaders()), String.class);
 
-            // --- Debug: log the full response ---
             if (carouselDebug) {
-                log.info("[AiSensy Carousel] Response status: {} | Body: {}", resp.getStatusCode(), resp.getBody());
+                log.info("[AiSensy Carousel] Response status={} body={}", resp.getStatusCode(), resp.getBody());
             }
 
             if (resp.getStatusCode().is2xxSuccessful()) {
-                log.info("[Carousel] Successfully sent {} card(s) to {}", cards.size(), phone);
+                log.info("[Carousel] ✅ Sent {} card(s) to phone={}", cards.size(), phone);
                 return true;
             }
-            log.warn("[Carousel] Non-2xx response for {}: status={} | body={}", phone, resp.getStatusCode(), resp.getBody());
+            log.warn("[Carousel] Non-2xx response for phone={}: status={} body={}",
+                    phone, resp.getStatusCode(), resp.getBody());
             return false;
 
         } catch (org.springframework.web.client.HttpClientErrorException e) {
-            log.error("[AiSensy Carousel] 4xx Client Error: status={} | errorBody={}",
+            log.error("[AiSensy Carousel] 4xx error: status={} body={}",
                     e.getStatusCode(), e.getResponseBodyAsString());
             return false;
         } catch (org.springframework.web.client.HttpServerErrorException e) {
-            log.error("[AiSensy Carousel] 5xx Server Error: status={} | errorBody={}",
+            log.error("[AiSensy Carousel] 5xx error: status={} body={}",
                     e.getStatusCode(), e.getResponseBodyAsString());
             return false;
         } catch (Exception e) {
-            log.error("[Carousel] Unexpected error sending carousel to {}: {}", phone, e.getMessage(), e);
+            log.error("[Carousel] Unexpected error sending carousel to phone={}: {}", phone, e.getMessage(), e);
             return false;
         }
     }
 
-    /**
-     * Logs a pre-send carousel debug summary in a readable format.
-     * cardMeta entries: [0]=name, [1]=label/price, [2]=imageUrl or "MISSING"
-     */
+    // =========================================================================
+    // AISENSY REPLY (plain text)
+    // =========================================================================
+
+    private void sendAiSensyReply(String phone, String text) {
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("to", phone);
+            payload.put("type", "text");
+            payload.put("recipient_type", "individual");
+            payload.put("text", Map.of("body", text));
+
+            restTemplate.postForEntity(
+                    buildAiSensyUrl(), new HttpEntity<>(payload, buildAiSensyHeaders()), String.class);
+        } catch (Exception e) {
+            log.warn("[AiSensy] Failed to send reply to phone={}: {}", phone, e.getMessage());
+        }
+    }
+
+    // =========================================================================
+    // AISENSY SHARED HELPERS (eliminates duplication between text and carousel)
+    // =========================================================================
+
+    private String buildAiSensyUrl() {
+        return "https://apis.aisensy.com/project-apis/v1/project/"
+                + appProperties.getAisensy().getProjectId() + "/messages";
+    }
+
+    private HttpHeaders buildAiSensyHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-AiSensy-Project-API-Pwd", appProperties.getAisensy().getApiKey());
+        return headers;
+    }
+
+    // =========================================================================
+    // CAROUSEL DEBUG SUMMARY
+    // =========================================================================
+
     private void logCarouselDebugSummary(String type, List<String[]> cardMeta) {
         long validCount = cardMeta.stream().filter(m -> !"MISSING".equals(m[2])).count();
         StringBuilder sb = new StringBuilder();
@@ -971,69 +1130,126 @@ public class WebhookController {
         sb.append("\nTemplate  : yotindia_carousel");
         sb.append("\nType      : ").append(type);
         sb.append("\nTotal     : ").append(cardMeta.size())
-          .append(" items  |  Valid cards: ").append(validCount)
+          .append(" items  |  Valid: ").append(validCount)
           .append("  |  Skipped (no image): ").append(cardMeta.size() - validCount);
         sb.append("\n");
         for (int i = 0; i < cardMeta.size(); i++) {
             String[] m = cardMeta.get(i);
             sb.append("\nCard ").append(i + 1).append(":");
-            sb.append("\n  Name   : ").append(m[0]);
-            sb.append("\n  Price  : ").append(m[1]);
-            sb.append("\n  Image  : ").append(m[2]);
-            sb.append("\n  Buttons: [View Details] [Order Now]");
+            sb.append("\n  Name  : ").append(m[0]);
+            sb.append("\n  Price : ").append(m[1]);
+            sb.append("\n  Image : ").append(m[2]);
+            sb.append("\n  Btns  : [View Details] [Order Now]");
             if ("MISSING".equals(m[2])) sb.append("  << CARD WILL BE SKIPPED");
         }
         sb.append("\n============================================================");
-        log.info(sb.toString());
+        log.debug(sb.toString());
     }
 
-    // ==========================================================================
-    // AiSensy REPLY
-    // ==========================================================================
-    private void sendAiSensyReply(String phone, String text) {
-        try {
-            String url = "https://apis.aisensy.com/project-apis/v1/project/" + appProperties.getAisensy().getProjectId() + "/messages";
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("to", phone);
-            payload.put("type", "text");
-            payload.put("recipient_type", "individual");
-            payload.put("text", Map.of("body", text));
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("X-AiSensy-Project-API-Pwd", appProperties.getAisensy().getApiKey());
-
-            restTemplate.postForEntity(url, new HttpEntity<>(payload, headers), JsonNode.class);
-        } catch (Exception e) {
-            log.warn("[AiSensy] Failed to send reply: {}", e.getMessage());
-        }
-    }
-
-    // ==========================================================================
+    // =========================================================================
     // UTILITY
-    // ==========================================================================
+    // =========================================================================
 
     private Map<String, Object> getUserData(String token) {
         return userData.computeIfAbsent(token, k -> new ConcurrentHashMap<>());
     }
 
+    /**
+     * Clears order-flow session data while preserving the BGS auth token.
+     * Resetting authToken would force re-authentication on every menu visit.
+     */
+    private void resetUserDataPreservingAuth(String token) {
+        Map<String, Object> data = userData.get(token);
+        if (data == null) return;
+        Map<String, Object> preserved = new HashMap<>();
+        for (String key : PRESERVED_KEYS_ON_RESET) {
+            if (data.containsKey(key)) {
+                preserved.put(key, data.get(key));
+            }
+        }
+        data.clear();
+        data.putAll(preserved);
+    }
+
+    private boolean isJwtExpired(String jwtToken) {
+        try {
+            String[] parts = jwtToken.split("\\.");
+            if (parts.length != 3) return true;
+            String payload = new String(Base64.getUrlDecoder().decode(parts[1]));
+            JsonNode json = objectMapper.readTree(payload);
+            long exp = json.path("exp").asLong(0);
+            return (exp * 1000) < (System.currentTimeMillis() + 60000);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /**
+     * Ensures the user has a valid BGS auth token. If not, triggers the OTP flow.
+     */
+    private boolean ensureAuthenticatedOrTriggerOtp(String phone, String token) {
+        String bgsAuthToken = (String) getUserData(token).get("authToken");
+        String bgsRefreshToken = (String) getUserData(token).get("refreshToken");
+
+        // Consume token pushed by external signup endpoint
+        if (bgsAuthToken == null) {
+            bgsAuthToken = bgsUserTokens.remove(phone);
+            if (bgsAuthToken != null) {
+                getUserData(token).put("authToken", bgsAuthToken);
+            }
+        }
+
+        if (bgsAuthToken != null) {
+            if (isJwtExpired(bgsAuthToken)) {
+                log.info("[Auth] Token expired for {}, attempting refresh", phone);
+                if (bgsRefreshToken != null) {
+                    AuthService.AuthResult result = authService.refreshSession(bgsRefreshToken);
+                    if (result.success) {
+                        getUserData(token).put("authToken", result.jwt);
+                        getUserData(token).put("refreshToken", result.refreshToken);
+                        return true;
+                    }
+                }
+                getUserData(token).remove("authToken");
+                getUserData(token).remove("refreshToken");
+            } else {
+                return true;
+            }
+        }
+
+        String state = userState.getOrDefault(token, STATE_START);
+        if (STATE_AWAITING_OTP.equals(state)) {
+            return true; 
+        }
+
+        if (authService.requestOtp(phone)) {
+            userState.put(token, STATE_AWAITING_OTP);
+            sendAiSensyReply(phone, "Welcome to *YotMart*!\n\nPlease enter the *OTP* sent to your number to continue.");
+        } else {
+            log.warn("[Auth] OTP request failed, trying signup for {}", phone);
+            if (authService.signupUser(phone) && authService.requestOtp(phone)) {
+                userState.put(token, STATE_AWAITING_OTP);
+                sendAiSensyReply(phone, "Welcome to *YotMart*!\n\nWe've created an account for you. Please enter the *OTP* sent to your number to continue.");
+            } else {
+                sendAiSensyReply(phone, "Sorry, we could not authenticate you at this time. Please try again later.");
+            }
+        }
+        return false;
+    }
+
     private boolean isProductInStock(JsonNode p) {
-        if (p == null)
-            return false;
-        // TotalStock from BGS API is the source of truth
-        return p.path("totalStock").asInt(0) > 0 || p.path("stock").asInt(0) > 0 || p.path("inStock").asBoolean(false)
+        if (p == null) return false;
+        return p.path("totalStock").asInt(0) > 0
+                || p.path("stock").asInt(0) > 0
+                || p.path("inStock").asBoolean(false)
                 || p.path("quantity").asInt(0) > 0;
     }
 
     private JsonNode resolveList(JsonNode node) {
-        if (node == null)
-            return null;
-        if (node.isArray())
-            return node;
-        // Check for paginated content array specifically
-        for (String key : new String[] { "content", "data", "items", "categories", "offers", "products" }) {
-            if (node.has(key) && node.get(key).isArray())
-                return node.get(key);
+        if (node == null) return null;
+        if (node.isArray()) return node;
+        for (String key : new String[]{"content", "data", "items", "categories", "offers", "products", "results", "list"}) {
+            if (node.has(key) && node.get(key).isArray()) return node.get(key);
         }
         return null;
     }
@@ -1041,34 +1257,42 @@ public class WebhookController {
     @SuppressWarnings("unchecked")
     private List<Map<String, String>> getListFromState(String token, String key) {
         Object raw = getUserData(token).get(key);
-        if (raw == null)
-            return null;
+        if (raw == null) return null;
         try {
             return objectMapper.readValue(raw.toString(),
                     objectMapper.getTypeFactory().constructCollectionType(List.class, Map.class));
         } catch (Exception e) {
+            log.error("[Session] Failed to parse '{}' from session: {} | raw='{}'", key, e.getMessage(), raw);
             return null;
         }
     }
 
     private Map<String, String> matchByIndex(List<Map<String, String>> items, String input) {
-        if (items == null || input == null)
-            return null;
+        if (items == null || input == null) return null;
         for (Map<String, String> item : items) {
-            if (input.equals(item.get("index")))
-                return item;
+            if (input.equals(item.get("index"))) return item;
         }
         return null;
     }
 
     private String resolvePaymentMethod(String input) {
-        if (input.equals("1"))
-            return "COD";
-        if (input.equals("2"))
-            return "UPI";
-        if (input.equals("3"))
-            return "ONLINE";
-        return null;
+        return switch (input) {
+            case "1" -> "COD";
+            case "2" -> "UPI";
+            case "3" -> "ONLINE";
+            default  -> null;
+        };
+    }
+
+    /**
+     * Returns the value at {@code metaIndex} from the first card whose image field is not "MISSING".
+     */
+    private String firstValidCardMeta(List<String[]> cardMeta, int metaIndex, String fallback) {
+        return cardMeta.stream()
+                .filter(m -> !"MISSING".equals(m[2]))
+                .map(m -> m[metaIndex])
+                .findFirst()
+                .orElse(fallback);
     }
 
     private ResponseEntity<Map<String, String>> ok(String status) {

@@ -10,6 +10,9 @@ import org.springframework.stereotype.Service;
 /**
  * Fetches active offers from the BGS backend and resolves discounted prices.
  * Endpoint: GET /offers?status=ACTIVE  (or /offers/offers/type/PROMOTIONAL)
+ *
+ * NOTE: fetchActiveOffersMessage() is defined for a future "Offers" menu option
+ * and is not currently wired to any active menu flow.
  */
 @Service
 public class OfferService {
@@ -23,15 +26,14 @@ public class OfferService {
 
     /**
      * Fetches active offers and formats them for WhatsApp display.
+     * Endpoint: GET /offers/offers/type/PRODUCT
      */
     public String fetchActiveOffersMessage() {
-        // Try preferred endpoint first, fall back to promotional endpoint
-        JsonNode data = bgsGet("/offers?status=ACTIVE");
+        JsonNode data = bgsGet("/offers/offers/type/PRODUCT");
         JsonNode list = resolveList(data);
 
         if (list == null || list.size() == 0) {
-            // fallback to promotional
-            data = bgsGet("/offers/offers/type/PROMOTIONAL");
+            data = bgsGet("/offers/offers/type/CATEGORY");
             list = resolveList(data);
         }
 
@@ -47,24 +49,34 @@ public class OfferService {
         int max = Math.min(list.size(), 8);
         for (int i = 0; i < max; i++) {
             JsonNode o = list.get(i);
-            String code  = o.path("code").asText(o.path("couponCode").asText("OFFER" + (i + 1)));
-            String title = o.path("title").asText(o.path("name").asText(""));
-            String desc  = o.path("description").asText("");
-            String dtype = o.path("discountType").asText("");
-            String dval  = o.path("discountValue").asText("");
-            String minOrd = o.path("minOrderValue").asText(o.path("minimumOrderAmount").asText(""));
+            
+            // Parse OfferModel fields strictly according to documentation
+            String id = o.path("id").asText(o.path("_id").asText(""));
+            String type = o.path("type").asText("PRODUCT");
+            String name = o.path("name").asText(o.path("title").asText(""));
+            String couponCode = o.path("couponCode").asText(o.path("code").asText("OFFER" + (i + 1)));
+            String discountType = o.path("discountType").asText("PERCENTAGE");
+            String discountValue = o.path("discountValue").asText("");
+            String maxDiscount = o.path("maxDiscount").asText("");
+            String description = o.path("description").asText("");
+            boolean active = o.path("active").asBoolean(true);
+            boolean autoApplied = o.path("autoApplied").asBoolean(false);
+
+            if (!active) continue;
 
             sb.append("----------------\n");
-            if (!title.isEmpty()) sb.append("*").append(title).append("*\n");
-            sb.append("Code: *").append(code).append("*\n");
+            if (!name.isEmpty()) sb.append("*").append(name).append("*\n");
+            sb.append("Code: *").append(couponCode).append("*\n");
 
-            if ("PERCENTAGE".equalsIgnoreCase(dtype)) {
-                sb.append("*").append(dval).append("% OFF*\n");
-            } else if ("FLAT".equalsIgnoreCase(dtype) || !dval.isEmpty()) {
-                sb.append("*₹").append(dval).append(" OFF*\n");
+            if ("PERCENTAGE".equalsIgnoreCase(discountType)) {
+                sb.append("*").append(discountValue).append("% OFF*\n");
+                if (!maxDiscount.isEmpty()) sb.append("Up to ₹").append(maxDiscount).append("\n");
+            } else {
+                sb.append("*₹").append(discountValue).append(" OFF*\n");
             }
-            if (!minOrd.isEmpty()) sb.append("Min order: ₹").append(minOrd).append("\n");
-            if (!desc.isEmpty())   sb.append("Note: ").append(desc).append("\n");
+            
+            if (autoApplied) sb.append("_Auto-applied at checkout_\n");
+            if (!description.isEmpty()) sb.append("Note: ").append(description).append("\n");
             sb.append("\n");
         }
         sb.append("----------------\n");
@@ -74,52 +86,55 @@ public class OfferService {
     }
 
     /**
-     * Applies the best applicable offer to a raw price.
-     * Returns DiscountResult with final price and offer description.
+     * Applies the best applicable offer/discount to a product.
+     * Checks product-level discounted/sale price vs. original price.
      *
-     * Currently: product-level discount via salePrice / discountedPrice fields.
-     * Extend with coupon / cart-level logic as needed.
+     * @param productDetails the full product JSON node from BGS
+     * @return DiscountResult with final price and optional offer description
      */
     public DiscountResult applyBestOffer(JsonNode productDetails) {
         if (productDetails == null) {
             return DiscountResult.noDiscount("0");
         }
 
-        // Prefer Vara-style pricing object first
-        JsonNode pricing = productDetails.path("pricing");
-        String originalStr = productDetails.path("price").asText(productDetails.path("mrp").asText("0"));
-        String discountedStr = productDetails.path("discountedPrice")
-                .asText(productDetails.path("salePrice").asText(productDetails.path("sellingPrice").asText("")));
+        // Base price: try price → mrp → "0"
+        String originalStr = productDetails.path("price")
+                .asText(productDetails.path("mrp").asText("0"));
 
+        // Discounted price: try discountedPrice → salePrice → sellingPrice
+        String discountedStr = productDetails.path("discountedPrice")
+                .asText(productDetails.path("salePrice")
+                        .asText(productDetails.path("sellingPrice").asText("")));
+
+        // Override with Vara-style pricing object if present and valid (finalPrice > 0)
+        JsonNode pricing = productDetails.path("pricing");
         if (!pricing.isMissingNode()) {
-            String pFinal = pricing.path("finalPrice").asText("");
-            String pBase = pricing.path("basePrice").asText(pricing.path("mrp").asText("0"));
-            if (!pFinal.isEmpty()) {
+            String pFinal = pricing.path("finalPrice").asText("").trim();
+            String pBase  = pricing.path("basePrice").asText(pricing.path("mrp").asText("")).trim();
+
+            double pFinalVal = parsePrice(pFinal);
+            if (pFinalVal > 0) {
                 discountedStr = pFinal;
-                originalStr = pBase.isEmpty() ? pFinal : pBase;
+                originalStr   = (!pBase.isEmpty() && parsePrice(pBase) > 0) ? pBase : pFinal;
             }
         }
 
         double original   = parsePrice(originalStr);
         double discounted = discountedStr.isEmpty() ? original : parsePrice(discountedStr);
 
-        // Inline product offer
+        // Inline product offer label (e.g. "10% off", "Sale")
         String offerLabel = productDetails.path("offerLabel")
                 .asText(productDetails.path("badge").asText(""));
 
-        if (discounted < original && discounted > 0) {
+        if (discounted > 0 && discounted < original) {
             int pct = (int) Math.round((original - discounted) / original * 100);
             String offerText = offerLabel.isEmpty() ? pct + "% off" : offerLabel;
-            return new DiscountResult(
-                    fmt(original),
-                    fmt(discounted),
-                    offerText,
-                    true
-            );
+            return new DiscountResult(fmt(original), fmt(discounted), offerText, true);
         }
 
-        // No discount
-        return DiscountResult.noDiscount(originalStr.isEmpty() ? "0" : originalStr);
+        // No discount — return original price
+        String displayPrice = (original > 0) ? fmt(original) : (originalStr.isEmpty() ? "0" : originalStr);
+        return DiscountResult.noDiscount(displayPrice);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -136,15 +151,20 @@ public class OfferService {
     private JsonNode resolveList(JsonNode node) {
         if (node == null) return null;
         if (node.isArray()) return node;
-        for (String key : new String[]{"data", "offers", "items", "results"}) {
+        for (String key : new String[]{"data", "offers", "items", "results", "list"}) {
             if (node.has(key) && node.get(key).isArray()) return node.get(key);
         }
         return null;
     }
 
     private double parsePrice(String s) {
-        try { return Double.parseDouble(s.replaceAll("[^\\d.]", "")); }
-        catch (Exception e) { return 0; }
+        if (s == null || s.isBlank()) return 0;
+        try {
+            return Double.parseDouble(s.replaceAll("[^\\d.]", ""));
+        } catch (Exception e) {
+            log.debug("[OfferService] Could not parse price value '{}': {}", s, e.getMessage());
+            return 0;
+        }
     }
 
     private String fmt(double v) {
