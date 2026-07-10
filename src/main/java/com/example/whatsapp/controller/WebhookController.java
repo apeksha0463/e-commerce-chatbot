@@ -770,6 +770,21 @@ public class WebhookController {
      * @param itemName the name of the product/category (for logging)
      * @return the highest-quality valid image URL, or null if none found
      */
+    /** Returns true only for non-blank https URLs. */
+    private boolean isValidImageUrl(String url) {
+        return url != null && !url.isBlank() && url.startsWith("https://");
+    }
+
+    /** Sanitizes the image URL, upgrading http:// to https:// and validating it. */
+    private String sanitizeImageUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        String cleaned = url.trim();
+        if (cleaned.startsWith("http://")) {
+            cleaned = "https://" + cleaned.substring(7);
+        }
+        return isValidImageUrl(cleaned) ? cleaned : null;
+    }
+
     private String extractImageUrl(JsonNode node, String itemName) {
         if (node == null) return null;
         String label = (itemName != null) ? itemName : "unknown";
@@ -778,8 +793,8 @@ public class WebhookController {
         JsonNode imageNode = node.path("image");
         if (!imageNode.isMissingNode()) {
             if (imageNode.isTextual()) {
-                String url = imageNode.asText("").trim();
-                if (isValidImageUrl(url)) {
+                String url = sanitizeImageUrl(imageNode.asText("").trim());
+                if (url != null) {
                     logImageFound(label, "image", url);
                     return url;
                 }
@@ -791,16 +806,16 @@ public class WebhookController {
 
         // ── 2. imageUrl ────────────────────────────────────────────────────
         {
-            String url = node.path("imageUrl").asText("").trim();
-            if (isValidImageUrl(url)) { logImageFound(label, "imageUrl", url); return url; }
+            String url = sanitizeImageUrl(node.path("imageUrl").asText("").trim());
+            if (url != null) { logImageFound(label, "imageUrl", url); return url; }
         }
 
         // ── 3. thumbnail — may be a plain string or nested object ──────────
         JsonNode thumbNode = node.path("thumbnail");
         if (!thumbNode.isMissingNode()) {
             if (thumbNode.isTextual()) {
-                String url = thumbNode.asText("").trim();
-                if (isValidImageUrl(url)) { logImageFound(label, "thumbnail", url); return url; }
+                String url = sanitizeImageUrl(thumbNode.asText("").trim());
+                if (url != null) { logImageFound(label, "thumbnail", url); return url; }
             } else if (thumbNode.isObject()) {
                 String url = bestQualityFromObject(thumbNode, label, "thumbnail");
                 if (url != null) return url;
@@ -816,14 +831,14 @@ public class WebhookController {
 
         // ── 5. featuredImage ───────────────────────────────────────────────
         {
-            String url = node.path("featuredImage").asText("").trim();
-            if (isValidImageUrl(url)) { logImageFound(label, "featuredImage", url); return url; }
+            String url = sanitizeImageUrl(node.path("featuredImage").asText("").trim());
+            if (url != null) { logImageFound(label, "featuredImage", url); return url; }
         }
 
         // ── 6. bannerImage ─────────────────────────────────────────────────
         {
-            String url = node.path("bannerImage").asText("").trim();
-            if (isValidImageUrl(url)) { logImageFound(label, "bannerImage", url); return url; }
+            String url = sanitizeImageUrl(node.path("bannerImage").asText("").trim());
+            if (url != null) { logImageFound(label, "bannerImage", url); return url; }
         }
 
         // ── 7. media (array) ───────────────────────────────────────────────
@@ -847,8 +862,9 @@ public class WebhookController {
         for (String quality : new String[]{"original", "md", "sm", "xs", "url", "src"}) {
             JsonNode qNode = obj.path(quality);
             if (qNode.isMissingNode()) continue;
-            String url = qNode.isTextual() ? qNode.asText("").trim() : qNode.path("url").asText("").trim();
-            if (isValidImageUrl(url)) {
+            String rawUrl = qNode.isTextual() ? qNode.asText("").trim() : qNode.path("url").asText("").trim();
+            String url = sanitizeImageUrl(rawUrl);
+            if (url != null) {
                 logImageFound(label, fieldName + "." + quality, url);
                 return url;
             }
@@ -864,8 +880,9 @@ public class WebhookController {
         if (!array.isArray() || array.size() == 0) return null;
         for (int i = 0; i < array.size(); i++) {
             JsonNode elem = array.get(i);
-            String url = elem.isTextual() ? elem.asText("").trim() : elem.path("url").asText("").trim();
-            if (isValidImageUrl(url)) {
+            String rawUrl = elem.isTextual() ? elem.asText("").trim() : elem.path("url").asText("").trim();
+            String url = sanitizeImageUrl(rawUrl);
+            if (url != null) {
                 logImageFound(label, fieldName + "[" + i + "]", url);
                 return url;
             }
@@ -879,12 +896,6 @@ public class WebhookController {
         } else {
             log.debug("[ImageExtract] '{}': found valid URL in field '{}': {}", label, field, url);
         }
-    }
-
-    /** Returns true only for non-blank http/https URLs. */
-    private boolean isValidImageUrl(String url) {
-        return url != null && !url.isBlank()
-                && (url.startsWith("http://") || url.startsWith("https://"));
     }
 
     /**
@@ -915,13 +926,13 @@ public class WebhookController {
         Map<String, Object> viewBtn = new HashMap<>();
         viewBtn.put("type", "button");
         viewBtn.put("sub_type", "quick_reply");
-        viewBtn.put("index", "0");
+        viewBtn.put("index", 0);
         viewBtn.put("parameters", List.of(Map.of("type", "payload", "payload", index)));
 
         Map<String, Object> orderBtn = new HashMap<>();
         orderBtn.put("type", "button");
         orderBtn.put("sub_type", "quick_reply");
-        orderBtn.put("index", "1");
+        orderBtn.put("index", 1);
         orderBtn.put("parameters", List.of(Map.of("type", "payload", "payload", "ORDER_" + index)));
 
         Map<String, Object> card = new HashMap<>();
@@ -971,22 +982,54 @@ public class WebhookController {
             payload.put("recipient_type", "individual");
             payload.put("template", template);
 
-            if (carouselDebug) {
-                try {
-                    log.info("[AiSensy Carousel] Sending to={} cards={} template=yotindia_carousel\nPayload:\n{}",
-                            phone, cards.size(),
-                            objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload));
-                } catch (Exception ex) {
-                    log.warn("[AiSensy Carousel] Could not serialize payload for debug logging: {}", ex.getMessage());
+            // Payload validation checks (Requirement 10)
+            if (cards.size() < 2 || cards.size() > 10) {
+                log.error("[AiSensy Carousel] Validation failed: cards size must be between 2 and 10 (current: {})", cards.size());
+                return false;
+            }
+            for (int i = 0; i < cards.size(); i++) {
+                Map<String, Object> card = cards.get(i);
+                if (card == null || !card.containsKey("components")) {
+                    log.error("[AiSensy Carousel] Validation failed: card at index {} is null or missing components", i);
+                    return false;
                 }
+                List<Map<String, Object>> comps = (List<Map<String, Object>>) card.get("components");
+                boolean hasImage = false;
+                for (Map<String, Object> comp : comps) {
+                    if ("header".equals(comp.get("type"))) {
+                        List<Map<String, Object>> params = (List<Map<String, Object>>) comp.get("parameters");
+                        if (params != null && !params.isEmpty()) {
+                            for (Map<String, Object> param : params) {
+                                if ("image".equals(param.get("type"))) {
+                                    Map<String, Object> img = (Map<String, Object>) param.get("image");
+                                    if (img != null && img.get("link") != null && !String.valueOf(img.get("link")).isBlank()) {
+                                        hasImage = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!hasImage) {
+                    log.error("[AiSensy Carousel] Validation failed: card at index {} does not have a valid header image link", i);
+                    return false;
+                }
+            }
+
+            // Print the COMPLETE JSON payload to the logs in pretty-printed format (Requirement 4)
+            String prettyPayload = "";
+            try {
+                prettyPayload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
+                log.info("[AiSensy Carousel] Sending to={} cards={} template=yotindia_carousel\nPayload:\n{}",
+                        phone, cards.size(), prettyPayload);
+            } catch (Exception ex) {
+                log.warn("[AiSensy Carousel] Could not serialize payload for debug logging: {}", ex.getMessage());
             }
 
             ResponseEntity<String> resp = restTemplate.postForEntity(
                     buildAiSensyUrl(), new HttpEntity<>(payload, buildAiSensyHeaders()), String.class);
 
-            if (carouselDebug) {
-                log.info("[AiSensy Carousel] Response status={} body={}", resp.getStatusCode(), resp.getBody());
-            }
+            log.info("[AiSensy Carousel] Response status={} body={}", resp.getStatusCode(), resp.getBody());
 
             if (resp.getStatusCode().is2xxSuccessful()) {
                 log.info("[Carousel] ✅ Sent {} card(s) to phone={}", cards.size(), phone);
@@ -997,16 +1040,34 @@ public class WebhookController {
             return false;
 
         } catch (org.springframework.web.client.HttpClientErrorException e) {
-            log.error("[AiSensy Carousel] 4xx error: status={} body={}",
-                    e.getStatusCode(), e.getResponseBodyAsString());
+            String responseBody = e.getResponseBodyAsString();
+            log.error("[AiSensy Carousel] 4xx error: status={} body={}", e.getStatusCode(), responseBody);
+            parseAndLogAiSensyError(responseBody);
             return false;
         } catch (org.springframework.web.client.HttpServerErrorException e) {
-            log.error("[AiSensy Carousel] 5xx error: status={} body={}",
-                    e.getStatusCode(), e.getResponseBodyAsString());
+            String responseBody = e.getResponseBodyAsString();
+            log.error("[AiSensy Carousel] 5xx error: status={} body={}", e.getStatusCode(), responseBody);
+            parseAndLogAiSensyError(responseBody);
             return false;
         } catch (Exception e) {
             log.error("[Carousel] Unexpected error sending carousel to phone={}: {}", phone, e.getMessage(), e);
             return false;
+        }
+    }
+
+    private void parseAndLogAiSensyError(String responseBody) {
+        try {
+            JsonNode jsonNode = objectMapper.readTree(responseBody);
+            if (jsonNode.has("error")) {
+                JsonNode err = jsonNode.path("error");
+                String code = err.path("code").asText("");
+                String msg = err.path("message").asText("");
+                log.error("[AiSensy Error Detail] Code: {}, Message: {}", code, msg);
+            } else if (jsonNode.has("message")) {
+                log.error("[AiSensy Error Detail] Message: {}", jsonNode.path("message").asText(""));
+            }
+        } catch (Exception ex) {
+            // ignore
         }
     }
 
@@ -1022,8 +1083,16 @@ public class WebhookController {
             payload.put("recipient_type", "individual");
             payload.put("text", Map.of("body", text));
 
-            restTemplate.postForEntity(
+            try {
+                String prettyPayload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload);
+                log.info("[AiSensy Text] Sending to={}\nPayload:\n{}", phone, prettyPayload);
+            } catch (Exception ex) {
+                log.warn("[AiSensy Text] Could not serialize payload for debug logging: {}", ex.getMessage());
+            }
+
+            ResponseEntity<String> resp = restTemplate.postForEntity(
                     buildAiSensyUrl(), new HttpEntity<>(payload, buildAiSensyHeaders()), String.class);
+            log.info("[AiSensy Text] Response status={} body={}", resp.getStatusCode(), resp.getBody());
         } catch (Exception e) {
             log.warn("[AiSensy] Failed to send reply to phone={}: {}", phone, e.getMessage());
         }
