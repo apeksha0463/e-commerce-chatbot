@@ -1185,7 +1185,13 @@ public class WebhookController {
     }
 
     /**
-     * Ensures the user has a valid BGS auth token. If not, triggers the OTP flow.
+     * Ensures the user has a valid BGS auth token.
+     *
+     * Uses the passwordless WhatsApp login endpoint which:
+     *  - auto-creates the user if not found
+     *  - returns a JWT immediately (no OTP round-trip required)
+     *
+     * Falls back to refresh-token flow if the existing JWT has expired.
      */
     private boolean ensureAuthenticatedOrTriggerOtp(String phone, String token) {
         String bgsAuthToken = (String) getUserData(token).get("authToken");
@@ -1210,30 +1216,28 @@ public class WebhookController {
                         return true;
                     }
                 }
+                // Refresh failed — clear stale tokens and re-authenticate
                 getUserData(token).remove("authToken");
                 getUserData(token).remove("refreshToken");
             } else {
-                return true;
+                return true; // Token is still valid
             }
         }
 
-        String state = userState.getOrDefault(token, STATE_START);
-        if (STATE_AWAITING_OTP.equals(state)) {
-            return true; 
+        // No valid token — use passwordless WhatsApp login (auto-creates user if needed)
+        log.info("[Auth] No valid token for {}, performing WhatsApp passwordless login", phone);
+        AuthService.AuthResult result = authService.whatsappLogin(phone);
+        if (result.success) {
+            getUserData(token).put("authToken", result.jwt);
+            if (result.refreshToken != null) {
+                getUserData(token).put("refreshToken", result.refreshToken);
+            }
+            log.info("[Auth] \u2705 WhatsApp login successful for {}", phone);
+            return true;
         }
 
-        if (authService.requestOtp(phone)) {
-            userState.put(token, STATE_AWAITING_OTP);
-            sendAiSensyReply(phone, "Welcome to *YotMart*!\n\nPlease enter the *OTP* sent to your number to continue.");
-        } else {
-            log.warn("[Auth] OTP request failed, trying signup for {}", phone);
-            if (authService.signupUser(phone) && authService.requestOtp(phone)) {
-                userState.put(token, STATE_AWAITING_OTP);
-                sendAiSensyReply(phone, "Welcome to *YotMart*!\n\nWe've created an account for you. Please enter the *OTP* sent to your number to continue.");
-            } else {
-                sendAiSensyReply(phone, "Sorry, we could not authenticate you at this time. Please try again later.");
-            }
-        }
+        log.error("[Auth] \u274c WhatsApp login failed for {}: {}", phone, result.message);
+        sendAiSensyReply(phone, "Sorry, we could not authenticate you at this time. Please try again later.");
         return false;
     }
 
