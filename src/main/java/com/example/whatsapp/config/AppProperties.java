@@ -13,47 +13,117 @@ public class AppProperties {
     private final Validation validation = new Validation();
     private final Rest rest = new Rest();
 
-    public Bgs getBgs() { return bgs; }
-    public Aisensy getAisensy() { return aisensy; }
-    public Session getSession() { return session; }
-    public Validation getValidation() { return validation; }
-    public Rest getRest() { return rest; }
+    public Bgs getBgs() {
+        return bgs;
+    }
+
+    public Aisensy getAisensy() {
+        return aisensy;
+    }
+
+    public Session getSession() {
+        return session;
+    }
+
+    public Validation getValidation() {
+        return validation;
+    }
+
+    public Rest getRest() {
+        return rest;
+    }
 
     public static class Bgs {
         private String baseUrl = "https://be.bgsinfotech.com";
         private String tenantId;
+        private String serverToken; // BGS Bearer token for authenticated endpoints (order, payment)
+        private String paymentRedirectUrl; // Redirect URL for Cashfree online/UPI payments
 
-        public String getBaseUrl() { return baseUrl; }
-        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
-        public String getTenantId() { return tenantId; }
-        public void setTenantId(String tenantId) { this.tenantId = tenantId; }
+        public String getBaseUrl() {
+            return baseUrl;
+        }
+
+        public void setBaseUrl(String baseUrl) {
+            this.baseUrl = baseUrl;
+        }
+
+        public String getTenantId() {
+            return tenantId;
+        }
+
+        public void setTenantId(String tenantId) {
+            this.tenantId = tenantId;
+        }
+
+        public String getServerToken() {
+            return serverToken;
+        }
+
+        public void setServerToken(String serverToken) {
+            this.serverToken = serverToken;
+        }
+
+        public String getPaymentRedirectUrl() {
+            return paymentRedirectUrl;
+        }
+
+        public void setPaymentRedirectUrl(String paymentRedirectUrl) {
+            this.paymentRedirectUrl = paymentRedirectUrl;
+        }
     }
 
     public static class Aisensy {
         private String apiKey;
         private String projectId;
 
-        public String getApiKey() { return apiKey; }
-        public void setApiKey(String apiKey) { this.apiKey = apiKey; }
-        public String getProjectId() { return projectId; }
-        public void setProjectId(String projectId) { this.projectId = projectId; }
+        public String getApiKey() {
+            return apiKey;
+        }
+
+        public void setApiKey(String apiKey) {
+            this.apiKey = apiKey;
+        }
+
+        public String getProjectId() {
+            return projectId;
+        }
+
+        public void setProjectId(String projectId) {
+            this.projectId = projectId;
+        }
     }
 
     public static class Session {
         private int timeoutMinutes = 30;
 
-        public int getTimeoutMinutes() { return timeoutMinutes; }
-        public void setTimeoutMinutes(int timeoutMinutes) { this.timeoutMinutes = timeoutMinutes; }
+        public int getTimeoutMinutes() {
+            return timeoutMinutes;
+        }
+
+        public void setTimeoutMinutes(int timeoutMinutes) {
+            this.timeoutMinutes = timeoutMinutes;
+        }
     }
 
     public static class Validation {
         private int minAddressLength = 10;
         private int pincodeLength = 6;
 
-        public int getMinAddressLength() { return minAddressLength; }
-        public void setMinAddressLength(int minAddressLength) { this.minAddressLength = minAddressLength; }
-        public int getPincodeLength() { return pincodeLength; }
-        public void setPincodeLength(int pincodeLength) { this.pincodeLength = pincodeLength; }
+        public int getMinAddressLength() {
+            return minAddressLength;
+        }
+
+        public void setMinAddressLength(int minAddressLength) {
+            this.minAddressLength = minAddressLength;
+        }
+
+        public int getPincodeLength() {
+            return pincodeLength;
+        }
+
+        public void setPincodeLength(int pincodeLength) {
+            this.pincodeLength = pincodeLength;
+        }
     }
 
     public static class Rest {
@@ -62,13 +132,36 @@ public class AppProperties {
         private int maxConnTotal = 100;
         private int maxConnPerRoute = 20;
 
-        public int getConnectTimeout() { return connectTimeout; }
-        public void setConnectTimeout(int connectTimeout) { this.connectTimeout = connectTimeout; }
-        public int getReadTimeout() { return readTimeout; }
-        public void setReadTimeout(int readTimeout) { this.readTimeout = readTimeout; }
-        public int getMaxConnTotal() { return maxConnTotal; }
-        public void setMaxConnTotal(int maxConnTotal) { this.maxConnTotal = maxConnTotal; }
-        public int getMaxConnPerRoute() { return maxConnPerRoute; }
-        public void setMaxConnPerRoute(int maxConnPerRoute) { this.maxConnPerRoute = maxConnPerRoute; }
+        public int getConnectTimeout() {
+            return connectTimeout;
+        }
+
+        public void setConnectTimeout(int connectTimeout) {
+            this.connectTimeout = connectTimeout;
+        }
+
+        public int getReadTimeout() {
+            return readTimeout;
+        }
+
+        public void setReadTimeout(int readTimeout) {
+            this.readTimeout = readTimeout;
+        }
+
+        public int getMaxConnTotal() {
+            return maxConnTotal;
+        }
+
+        public void setMaxConnTotal(int maxConnTotal) {
+            this.maxConnTotal = maxConnTotal;
+        }
+
+        public int getMaxConnPerRoute() {
+            return maxConnPerRoute;
+        }
+
+        public void setMaxConnPerRoute(int maxConnPerRoute) {
+            this.maxConnPerRoute = maxConnPerRoute;
+        }
     }
 }
