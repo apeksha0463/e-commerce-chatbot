@@ -49,8 +49,17 @@ public class BgsApiClient {
 
     private HttpHeaders getHeadersWithAuth(String token) {
         HttpHeaders headers = getHeaders();
-        if (token != null && !token.isBlank()) {
-            headers.set("Authorization", "Bearer " + token);
+        // Use the provided customer token; fall back to the configured BGS server token
+        String effectiveToken = (token != null && !token.isBlank())
+                ? token
+                : appProperties.getBgs().getServerToken();
+        if (effectiveToken != null && !effectiveToken.isBlank()) {
+            headers.set("Authorization", "Bearer " + effectiveToken);
+            log.debug("[BGS Client] Auth header set (token source: {})",
+                    (token != null && !token.isBlank()) ? "customer" : "server");
+        } else {
+            log.warn("[BGS Client] No auth token available — request will be sent without Authorization header. "
+                    + "Set app.bgs.server-token in application.properties.");
         }
         return headers;
     }
@@ -69,14 +78,11 @@ public class BgsApiClient {
 
     /**
      * Full GET with optional auth token.
+     * 
      * @Retryable and @CircuitBreaker are applied HERE (not on the overload above)
-     * to avoid the Spring AOP self-invocation bypass.
+     *            to avoid the Spring AOP self-invocation bypass.
      */
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
+    @Retryable(value = { Exception.class }, maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
     @CircuitBreaker(name = "bgsApi")
     public JsonNode get(String path, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
@@ -109,11 +115,7 @@ public class BgsApiClient {
      * Full POST with optional auth token.
      * Retry and circuit-breaker annotations live here only.
      */
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
+    @Retryable(value = { Exception.class }, maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
     @CircuitBreaker(name = "bgsApi")
     public JsonNode post(String path, Map<String, Object> body, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
@@ -145,11 +147,7 @@ public class BgsApiClient {
      * Full PUT with optional auth token.
      * Retry and circuit-breaker annotations live here only.
      */
-    @Retryable(
-            value = {Exception.class},
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
+    @Retryable(value = { Exception.class }, maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
     @CircuitBreaker(name = "bgsApi")
     public JsonNode put(String path, String customerToken) {
         String url = appProperties.getBgs().getBaseUrl() + path;
@@ -169,5 +167,50 @@ public class BgsApiClient {
             log.error("[BGS Client] PUT request failed for URL {}: {}", url, e.getMessage());
             throw e;
         }
+    }
+
+    // ── WhatsApp Auth ─────────────────────────────────────────────────────────
+
+    /**
+     * Logs in (or auto-registers) a WhatsApp user by phone number.
+     * Calls POST /user-service/api/auth/whatsapp/login
+     *
+     * @param phone the customer's full phone number (e.g. 919876543210)
+     * @return JWT access token string, or null if login failed
+     */
+    public String whatsappLogin(String phone) {
+        String url = appProperties.getBgs().getBaseUrl() + "/user-service/api/auth/whatsapp/login";
+        log.info("[BGS Client] WhatsApp login for phone={}", phone);
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("X-Tenant-ID", appProperties.getBgs().getTenantId());
+
+            Map<String, String> body = Map.of("phone", phone);
+            HttpEntity<Map<String, String>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<JsonNode> response = restTemplate.postForEntity(url, entity, JsonNode.class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                // JwtResponse fields: token / accessToken / jwtToken
+                JsonNode json = response.getBody();
+                for (String field : new String[] { "token", "accessToken", "jwtToken", "jwt" }) {
+                    String token = json.path(field).asText("").trim();
+                    if (!token.isEmpty()) {
+                        log.info("[BGS Client] ✅ WhatsApp login successful for phone={}", phone);
+                        return token;
+                    }
+                }
+                log.warn("[BGS Client] WhatsApp login response missing token field for phone={}. Response: {}", phone,
+                        json);
+            } else {
+                log.error("[BGS Client] WhatsApp login failed for phone={}: status={}", phone,
+                        response.getStatusCode());
+            }
+        } catch (Exception e) {
+            log.error("[BGS Client] WhatsApp login exception for phone={}: {}", phone, e.getMessage(), e);
+        }
+        return null;
     }
 }
