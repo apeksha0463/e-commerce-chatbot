@@ -43,13 +43,7 @@ public class WebhookController {
     private OfferService offerService;
 
     @Autowired
-    private AuthService authService;
-
-    @Autowired
     private ValidationService validationService;
-
-    @Value("${app.bot.api-secret:}")
-    private String botApiSecret;
 
     /**
      * Set app.carousel.debug=false in application.properties to suppress verbose
@@ -72,26 +66,15 @@ public class WebhookController {
     private static final String STATE_ORDER_ADDRESS  = "ORDER_ADDRESS";
     private static final String STATE_ORDER_PAYMENT  = "ORDER_PAYMENT";
     private static final String STATE_ORDER_CONFIRM  = "ORDER_CONFIRM";
-    private static final String STATE_AWAITING_OTP   = "AWAITING_OTP";
 
     /** Sentinel returned by fetchCategories/fetchProducts when carousel was sent successfully. */
     private static final String CAROUSEL_SENT = "__CAROUSEL_SENT__";
-
-    /**
-     * Keys preserved in userData on global reset (0/hi/menu).
-     * Everything else is cleared. authToken MUST be preserved to avoid re-auth on every menu visit.
-     */
-    private static final Set<String> PRESERVED_KEYS_ON_RESET =
-            Set.of("authToken", "refreshToken");
 
     // --- In-memory state stores ---------------------------------------------
     private static final Map<String, String>              phoneTokenMap       = new ConcurrentHashMap<>();
     private static final Map<String, Long>                lastInteractionTime = new ConcurrentHashMap<>();
     private static final Map<String, String>              userState           = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, Object>> userData            = new ConcurrentHashMap<>();
-
-    /** Tokens pushed from external signup (Key: Phone, Value: BGS Auth Token). */
-    private static final Map<String, String> bgsUserTokens = new ConcurrentHashMap<>();
 
     private String getOrCreateToken(String phone) {
         return phoneTokenMap.computeIfAbsent(phone, k -> UUID.randomUUID().toString());
@@ -121,7 +104,6 @@ public class WebhookController {
                 if (phone != null) {
                     sendAiSensyReply(phone, "⏳ Your session has timed out due to inactivity. Type *hi* to start over.");
                     phoneTokenMap.remove(phone);
-                    bgsUserTokens.remove(phone);
                     log.info("[Session] Timed out session for phone={}", phone);
                 }
                 userState.remove(token);
@@ -138,33 +120,6 @@ public class WebhookController {
     @GetMapping("/messages/whatsapp")
     public String testWebhook() {
         return "Webhook is running";
-    }
-
-    // =========================================================================
-    // EXTERNAL SIGNUP — BGS pushes auth token after user signs up on the website
-    // =========================================================================
-
-    @PostMapping("/api/external/signup")
-    public ResponseEntity<Map<String, String>> externalSignup(
-            @RequestHeader(value = "X-Bot-API-Secret", required = false) String secret,
-            @RequestBody JsonNode payload) {
-
-        if (botApiSecret != null && !botApiSecret.isEmpty() && !botApiSecret.equals(secret)) {
-            log.warn("[ExternalSignup] Unauthorized attempt — invalid API secret");
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(Map.of("status", "error", "message", "Invalid API Secret"));
-        }
-
-        String phone     = payload.path("phone").asText("").trim();
-        String authToken = payload.path("authToken").asText("").trim();
-
-        if (phone.isEmpty() || authToken.isEmpty()) {
-            return badRequest("Both 'phone' and 'authToken' are required.");
-        }
-
-        bgsUserTokens.put(phone, authToken);
-        log.info("[ExternalSignup] Token stored for phone={}", phone);
-        return ok("Signup successful in bot context");
     }
 
     // =========================================================================
@@ -195,25 +150,7 @@ public class WebhookController {
             String token = getOrCreateToken(phone);
             lastInteractionTime.put(token, System.currentTimeMillis());
 
-            // Authenticate with BGS if not already done
-            if (!ensureAuthenticatedOrTriggerOtp(phone, token)) {
-                return ok("awaiting_otp");
-            }
-
             String input = text.toLowerCase().trim();
-
-            if (STATE_AWAITING_OTP.equals(userState.getOrDefault(token, STATE_START))) {
-                AuthService.AuthResult authRes = authService.verifyOtp(phone, input);
-                if (authRes.success) {
-                    getUserData(token).put("authToken", authRes.jwt);
-                    getUserData(token).put("refreshToken", authRes.refreshToken);
-                    userState.put(token, STATE_MENU);
-                    sendAiSensyReply(phone, "✅ Login successful!\n\n" + buildMenuMessage());
-                } else {
-                    sendAiSensyReply(phone, "❌ Invalid OTP. Please try again.");
-                }
-                return ok("ok");
-            }
 
             String state = userState.getOrDefault(token, STATE_START);
             String reply;
@@ -465,14 +402,6 @@ public class WebhookController {
         String address   = (String) d.get("orderAddress");
         String pincode   = (String) d.get("orderPincode");
         String payment   = (String) d.get("paymentMethod");
-        String authToken = (String) d.get("authToken");
-
-        if (authToken == null) {
-            log.error("[Order] Cannot process order for {}: Missing BGS auth token.", phone);
-            return new OrderPlacementResult(false,
-                    "Oops! We could not verify your account. Please type 0 to start over.");
-        }
-
         // 1. Re-validate stock (CRITICAL — price/availability can change between browse and confirm)
         JsonNode details = bgsGet("/product/items/" + prodId);
         if (!isProductInStock(details)) {
@@ -486,12 +415,10 @@ public class WebhookController {
                 phone, prodName, prodId, finalPrice, payment);
 
         OrderService.OrderResult orderRes = orderService.createOrder(
-                phone, prodId, prodName, finalPrice, name, address, pincode, payment, authToken);
+                phone, prodId, prodName, finalPrice, name, address, pincode, payment, null);
 
         if (!orderRes.success) {
             log.error("[Order] Creation failed for phone={}: {}", phone, orderRes.errorMessage);
-            // Clear auth token to force refresh on next interaction
-            getUserData(token).remove("authToken");
             return new OrderPlacementResult(false,
                     "Oops! Something went wrong while creating your order. Please try again later.");
         }
@@ -508,7 +435,7 @@ public class WebhookController {
         // 3. Generate payment link if not COD
         if (!"COD".equals(payment)) {
             PaymentService.PaymentResult payRes =
-                    paymentService.generatePaymentLink(orderId, phone, finalPrice, payment, authToken);
+                    paymentService.generatePaymentLink(orderId, phone, finalPrice, payment, null);
 
             if (payRes.success) {
                 msg.append("\n\n*Please complete your payment here:*\n").append(payRes.paymentLink);
@@ -523,7 +450,7 @@ public class WebhookController {
             }
         }
 
-        // Cleanup order-flow data (preserve authToken for future interactions)
+        // Cleanup order-flow data
         resetUserDataPreservingAuth(token);
         return new OrderPlacementResult(true, msg.toString());
     }
@@ -1155,90 +1082,13 @@ public class WebhookController {
     }
 
     /**
-     * Clears order-flow session data while preserving the BGS auth token.
-     * Resetting authToken would force re-authentication on every menu visit.
+     * Clears order-flow session data.
      */
     private void resetUserDataPreservingAuth(String token) {
         Map<String, Object> data = userData.get(token);
-        if (data == null) return;
-        Map<String, Object> preserved = new HashMap<>();
-        for (String key : PRESERVED_KEYS_ON_RESET) {
-            if (data.containsKey(key)) {
-                preserved.put(key, data.get(key));
-            }
+        if (data != null) {
+            data.clear();
         }
-        data.clear();
-        data.putAll(preserved);
-    }
-
-    private boolean isJwtExpired(String jwtToken) {
-        try {
-            String[] parts = jwtToken.split("\\.");
-            if (parts.length != 3) return true;
-            String payload = new String(Base64.getUrlDecoder().decode(parts[1]));
-            JsonNode json = objectMapper.readTree(payload);
-            long exp = json.path("exp").asLong(0);
-            return (exp * 1000) < (System.currentTimeMillis() + 60000);
-        } catch (Exception e) {
-            return true;
-        }
-    }
-
-    /**
-     * Ensures the user has a valid BGS auth token.
-     *
-     * Uses the passwordless WhatsApp login endpoint which:
-     *  - auto-creates the user if not found
-     *  - returns a JWT immediately (no OTP round-trip required)
-     *
-     * Falls back to refresh-token flow if the existing JWT has expired.
-     */
-    private boolean ensureAuthenticatedOrTriggerOtp(String phone, String token) {
-        String bgsAuthToken = (String) getUserData(token).get("authToken");
-        String bgsRefreshToken = (String) getUserData(token).get("refreshToken");
-
-        // Consume token pushed by external signup endpoint
-        if (bgsAuthToken == null) {
-            bgsAuthToken = bgsUserTokens.remove(phone);
-            if (bgsAuthToken != null) {
-                getUserData(token).put("authToken", bgsAuthToken);
-            }
-        }
-
-        if (bgsAuthToken != null) {
-            if (isJwtExpired(bgsAuthToken)) {
-                log.info("[Auth] Token expired for {}, attempting refresh", phone);
-                if (bgsRefreshToken != null) {
-                    AuthService.AuthResult result = authService.refreshSession(bgsRefreshToken);
-                    if (result.success) {
-                        getUserData(token).put("authToken", result.jwt);
-                        getUserData(token).put("refreshToken", result.refreshToken);
-                        return true;
-                    }
-                }
-                // Refresh failed — clear stale tokens and re-authenticate
-                getUserData(token).remove("authToken");
-                getUserData(token).remove("refreshToken");
-            } else {
-                return true; // Token is still valid
-            }
-        }
-
-        // No valid token — use passwordless WhatsApp login (auto-creates user if needed)
-        log.info("[Auth] No valid token for {}, performing WhatsApp passwordless login", phone);
-        AuthService.AuthResult result = authService.whatsappLogin(phone);
-        if (result.success) {
-            getUserData(token).put("authToken", result.jwt);
-            if (result.refreshToken != null) {
-                getUserData(token).put("refreshToken", result.refreshToken);
-            }
-            log.info("[Auth] \u2705 WhatsApp login successful for {}", phone);
-            return true;
-        }
-
-        log.error("[Auth] \u274c WhatsApp login failed for {}: {}", phone, result.message);
-        sendAiSensyReply(phone, "Sorry, we could not authenticate you at this time. Please try again later.");
-        return false;
     }
 
     private boolean isProductInStock(JsonNode p) {
